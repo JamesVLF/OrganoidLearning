@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+import braindance
 from braindance.analysis import data_loader
 
 try:
@@ -30,38 +31,32 @@ class Mapping:
 
         self.set_mapping(self.mapping)
 
-    # ---- Factory methods ----
 
-    @classmethod
+    # ---- Factory methods ----
     def from_csv(cls, filepath):
         return cls(filepath, from_csv=True)
 
-    @classmethod
     def from_df(cls, df):
         return cls(df=df)
 
-    @classmethod
     def from_maxwell(cls, filepath, channels=None):
         return cls(filepath, channels=channels)
 
-    # ---- Selection methods ----
 
+    # ---- Selection methods ----
     def select_electrodes(self, electrodes):
         self.selected_electrodes = electrodes
         self.selected_channels = [
             int(self.mapping[self.mapping['electrode'] == e]['channel'].values[0])
             for e in electrodes
         ]
-
     def select_channels(self, channels):
         self.selected_channels = channels
         self.selected_electrodes = [
             int(self.mapping[self.mapping['channel'] == ch]['electrode'].values[0])
             for ch in channels
         ]
-
     # ---- Mapping configuration ----
-
     def set_mapping(self, mapping):
         """Stores mapping and flattens lists of channels/electrodes."""
         if mapping is None:
@@ -73,8 +68,8 @@ class Mapping:
         self.channels = mapping['channel'].astype(int).tolist()
         self.electrodes = mapping['electrode'].astype(int).tolist()
 
-    # ---- Conversion methods ----
 
+    # ---- Conversion methods ----
     def get_electrodes(self, channels=None):
         """Return electrode(s) corresponding to given channel(s)."""
         channels = self.channels if channels is None else [channels] if isinstance(channels, int) else channels
@@ -82,7 +77,6 @@ class Mapping:
             int(self.mapping[self.mapping['channel'] == ch]['electrode'].values[0])
             for ch in channels
         ]
-
     def get_channels(self, electrodes=None):
         """Return channel(s) corresponding to given electrode(s)."""
         electrodes = self.electrodes if electrodes is None else [electrodes] if isinstance(electrodes, int) else electrodes
@@ -90,7 +84,6 @@ class Mapping:
             int(self.mapping[self.mapping['electrode'] == elec]['channel'].values[0])
             for elec in electrodes
         ]
-
     def get_orig_channels(self, channels=None, electrodes=None):
         """Return original channels for given channels or electrodes."""
         if channels is not None:
@@ -101,7 +94,6 @@ class Mapping:
             return self.mapping['orig_channel'].astype(int).tolist()
 
     # ---- Spatial methods ----
-
     def get_nearest(self, channel=None, electrode=None, n=None, distance=None):
         """
         Get nearest channels (or electrodes) based on physical distance.
@@ -143,8 +135,8 @@ class Mapping:
 
         return self.mapping[self.mapping['channel'].isin(channels)][['x', 'y']].values
 
-    # ---- Save ----
 
+    # ---- Save ----
     def save(self, filepath):
         with smart_open.open(filepath, 'w') as f:
             self.mapping.to_csv(f, index=False)
