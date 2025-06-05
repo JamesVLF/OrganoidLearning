@@ -1,6 +1,7 @@
 # OrgLearningEval.py - Central class interface
 
-from core.data_loader import load_datasets, load_spike_data, load_log_data, load_causal_info, load_metadata
+from core.data_loader import load_spike_data, load_log_data, load_causal_info, load_metadata
+from core.map_utils import plot_architecture_map, plot_causal_metrics_vs_reward, plot_reward_vs_causal_metrics
 from core.spike_data_utils import calculate_mean_firing_rates
 from core.analysis_utils import get_correlation_matrix, causal_plot
 from viz.plots_general import plot_raster, plot_firing_rates, plot_correlation_matrix, plot_smoothed_reward, plot_all_rewards_overlay
@@ -79,3 +80,9 @@ class OrgLearningEval:
 
     def show_all_rewards_overlay(self):
         plot_all_rewards_overlay(self.log_data)
+
+    def show_architecture_map(self):
+        plot_architecture_map(self.metadata)
+
+    def show_causal_metrics_plot(self, pattern_log):
+        plot_causal_metrics_vs_reward(self.causal_info, self.metadata, pattern_log)
