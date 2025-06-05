@@ -1,4 +1,7 @@
-# OrgLearningEval.py - Central class interface
+'''
+OrgLearningEval.py - Central class interface for methods aimed at evaluating the adaptive learning
+capacity of organoids through dynamic control tasks.
+'''
 
 from core.data_loader import load_spike_data, load_log_data, load_causal_info, load_metadata
 from core.map_utils import plot_architecture_map, plot_causal_metrics_vs_reward, plot_reward_vs_causal_metrics
