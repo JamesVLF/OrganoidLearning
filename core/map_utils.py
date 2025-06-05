@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
-import braindance
 from braindance.analysis import data_loader
 
 try:
@@ -13,6 +13,9 @@ except ImportError:
     bgr = False
 
 
+# ==============================
+# Mapping Class
+# ==============================
 class Mapping:
     def __init__(self, filepath=None, df=None, from_csv=False, channels=None):
         """Initialize Mapping from a file or DataFrame."""
@@ -31,17 +34,18 @@ class Mapping:
 
         self.set_mapping(self.mapping)
 
-
     # ---- Factory methods ----
+    @classmethod
     def from_csv(cls, filepath):
         return cls(filepath, from_csv=True)
 
+    @classmethod
     def from_df(cls, df):
         return cls(df=df)
 
+    @classmethod
     def from_maxwell(cls, filepath, channels=None):
         return cls(filepath, channels=channels)
-
 
     # ---- Selection methods ----
     def select_electrodes(self, electrodes):
@@ -50,15 +54,16 @@ class Mapping:
             int(self.mapping[self.mapping['electrode'] == e]['channel'].values[0])
             for e in electrodes
         ]
+
     def select_channels(self, channels):
         self.selected_channels = channels
         self.selected_electrodes = [
             int(self.mapping[self.mapping['channel'] == ch]['electrode'].values[0])
             for ch in channels
         ]
-    # ---- Mapping configuration ----
+
+    # ---- Configuration ----
     def set_mapping(self, mapping):
-        """Stores mapping and flattens lists of channels/electrodes."""
         if mapping is None:
             print("No mapping provided")
             self.mapping = self.channels = self.electrodes = None
@@ -68,24 +73,22 @@ class Mapping:
         self.channels = mapping['channel'].astype(int).tolist()
         self.electrodes = mapping['electrode'].astype(int).tolist()
 
-
-    # ---- Conversion methods ----
+    # ---- Conversion ----
     def get_electrodes(self, channels=None):
-        """Return electrode(s) corresponding to given channel(s)."""
         channels = self.channels if channels is None else [channels] if isinstance(channels, int) else channels
         return [
             int(self.mapping[self.mapping['channel'] == ch]['electrode'].values[0])
             for ch in channels
         ]
+
     def get_channels(self, electrodes=None):
-        """Return channel(s) corresponding to given electrode(s)."""
         electrodes = self.electrodes if electrodes is None else [electrodes] if isinstance(electrodes, int) else electrodes
         return [
             int(self.mapping[self.mapping['electrode'] == elec]['channel'].values[0])
             for elec in electrodes
         ]
+
     def get_orig_channels(self, channels=None, electrodes=None):
-        """Return original channels for given channels or electrodes."""
         if channels is not None:
             return [int(self.mapping[self.mapping['channel'] == ch]['orig_channel'].values[0]) for ch in channels]
         elif electrodes is not None:
@@ -93,15 +96,9 @@ class Mapping:
         else:
             return self.mapping['orig_channel'].astype(int).tolist()
 
-    # ---- Spatial methods ----
     def get_nearest(self, channel=None, electrode=None, n=None, distance=None):
-        """
-        Get nearest channels (or electrodes) based on physical distance.
-        Prioritize 'n' closest or those within given 'distance'.
-        """
         if channel is None and electrode is None:
             raise ValueError("Must provide either channel or electrode")
-
         if electrode is not None:
             channel = self.get_channels(electrode)[0]
 
@@ -111,21 +108,17 @@ class Mapping:
 
         channel_distances = [
             (int(all_positions[i][0]), distances[i])
-            for i in range(len(distances))
-            if int(all_positions[i][0]) != channel
+            for i in range(len(distances)) if int(all_positions[i][0]) != channel
         ]
-
         channel_distances.sort(key=lambda x: x[1])
 
         if distance is not None:
             channel_distances = [cd for cd in channel_distances if cd[1] <= distance]
 
         nearest_channels = [ch for ch, _ in channel_distances[:n] if n is not None or True]
-
         return self.get_electrodes(nearest_channels) if electrode is not None else nearest_channels
 
     def get_positions(self, channels=None, electrodes=None):
-        """Return x, y positions for specified channels or electrodes."""
         if channels is not None and electrodes is not None:
             raise ValueError("Provide either channels or electrodes, not both.")
         if electrodes is not None:
@@ -135,8 +128,140 @@ class Mapping:
 
         return self.mapping[self.mapping['channel'].isin(channels)][['x', 'y']].values
 
-
     # ---- Save ----
     def save(self, filepath):
         with smart_open.open(filepath, 'w') as f:
             self.mapping.to_csv(f, index=False)
+
+
+# ==============================
+# Visualization Functions
+# ==============================
+def plot_architecture_map(metadata):
+    mapping = metadata['mapping']
+    encode_electrodes = metadata['encode_electrodes']
+    decode_electrodes = metadata['decode_electrodes']
+    training_electrodes = metadata['training_electrodes']
+    spike_locs = np.array(metadata['spike_locs'])
+
+    mapper = Mapping.from_df(mapping)
+    encode_positions = mapper.get_positions(electrodes=encode_electrodes)
+    decode_positions = mapper.get_positions(electrodes=decode_electrodes)
+    training_positions = mapper.get_positions(electrodes=training_electrodes)
+    all_positions = mapper.get_positions()
+
+    spikes_x = spike_locs[:, 0]
+    spikes_y = spike_locs[:, 1]
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.scatter(all_positions[:, 0], all_positions[:, 1], s=2, label='Unused', zorder=-3)
+    ax.scatter(encode_positions[:, 0], encode_positions[:, 1], c='blue', label='Encode',
+               s=60, marker='X', alpha=1)
+    ax.scatter(decode_positions[:, 0], decode_positions[:, 1], c='g', label='Decode',
+               s=60, marker='o', alpha=0.8, facecolors='none', linewidths=1.5)
+    ax.scatter(training_positions[:, 0], training_positions[:, 1], c='purple', label='Training',
+               s=60, marker='s', alpha=0.8, facecolors='none', linewidths=1.5)
+    ax.scatter(spikes_x, spikes_y, label='Neural Unit', c='r', alpha=0.6, zorder=-2)
+
+    ax.set_title('Electrode Roles on Array')
+    ax.set_xlabel('X Position (µm)')
+    ax.set_ylabel('Y Position (µm)')
+    ax.legend(loc='upper right')
+    ax.set_aspect('equal', adjustable='box')
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_causal_metrics_vs_reward(causal_info, metadata, pattern_log):
+    first_order = causal_info["first_order_connectivity"]
+    multi_order = causal_info["multi_order_connectivity"]
+    burst_percent = causal_info["burst_percent"]
+    training_inds = metadata["training_inds"]
+
+    # Make stim_indices hashable
+    pattern_log["stim_key"] = pattern_log["stim_indices"].apply(tuple)
+
+    # Compute mean reward per pattern
+    pattern_rewards = pattern_log.groupby("stim_key")["reward"].mean()
+
+    rows = []
+    for stim_key, avg_reward in pattern_rewards.items():
+        if len(stim_key) != 2:
+            continue
+        stim_i, stim_j = stim_key
+        c1 = first_order[stim_i, stim_j]
+        cm = multi_order[stim_i, stim_j]
+        burst = burst_percent[stim_j]
+
+        rows.append({
+            "Pattern": f"{stim_i}-{stim_j}",
+            "AvgReward": avg_reward,
+            "FirstOrder": c1,
+            "MultiOrder": cm,
+            "Burst": burst
+        })
+
+    df = pd.DataFrame(rows)
+
+    # === Plot ===
+    plt.figure(figsize=(10, 6))
+    plt.scatter(df["FirstOrder"], df["AvgReward"], label="First-Order Causal")
+    plt.scatter(df["MultiOrder"], df["AvgReward"], label="Multi-Order Causal")
+    plt.scatter(df["Burst"], df["AvgReward"], label="Output Burst %")
+    plt.xlabel("Metric Value")
+    plt.ylabel("Average Reward")
+    plt.title("Reward vs. Causal Metrics (Per Pattern)")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+def plot_reward_vs_causal_metrics(causal_info, metadata, pattern_log):
+    """
+    Plot average reward vs. first-order/multi-order causality and burst percent
+    for each stimulation pattern.
+    """
+    first_order = causal_info["first_order_connectivity"]
+    multi_order = causal_info["multi_order_connectivity"]
+    burst_percent = causal_info["burst_percent"]
+
+    # Make stim_indices hashable
+    pattern_log = pattern_log.copy()
+    pattern_log["stim_key"] = pattern_log["stim_indices"].apply(tuple)
+
+    # Compute mean reward per pattern
+    pattern_rewards = pattern_log.groupby("stim_key")["reward"].mean()
+
+    # Collect metrics per stimulation pattern
+    rows = []
+    for stim_key, avg_reward in pattern_rewards.items():
+        if len(stim_key) != 2:
+            continue  # skip malformed patterns
+        stim_i, stim_j = stim_key
+
+        c1 = first_order[stim_i, stim_j]
+        cm = multi_order[stim_i, stim_j]
+        burst = burst_percent[stim_j]
+
+        rows.append({
+            "Pattern": f"{stim_i}-{stim_j}",
+            "AvgReward": avg_reward,
+            "FirstOrder": c1,
+            "MultiOrder": cm,
+            "Burst": burst
+        })
+
+    df = pd.DataFrame(rows)
+
+    # === Plot ===
+    plt.figure(figsize=(10, 6))
+    plt.scatter(df["FirstOrder"], df["AvgReward"], label="First-Order Causal")
+    plt.scatter(df["MultiOrder"], df["AvgReward"], label="Multi-Order Causal")
+    plt.scatter(df["Burst"], df["AvgReward"], label="Output Burst %")
+    plt.xlabel("Metric Value")
+    plt.ylabel("Average Reward")
+    plt.title("Reward vs. Causal Metrics (Per Pattern)")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
