@@ -4,10 +4,10 @@ capacity of organoids through dynamic control tasks.
 '''
 
 from core.data_loader import load_spike_data, load_log_data, load_causal_info, load_metadata
-from core.map_utils import plot_architecture_map, plot_causal_metrics_vs_reward, plot_reward_vs_causal_metrics
+from core.map_utils import plot_architecture_map
 from core.spike_data_utils import calculate_mean_firing_rates
 from core.analysis_utils import get_correlation_matrix, causal_plot
-from viz.plots_general import plot_raster, plot_firing_rates, plot_correlation_matrix, plot_smoothed_reward, plot_all_rewards_overlay
+from viz.plots_general import plot_raster, plot_firing_rates, plot_correlation_matrix, plot_smoothed_reward, plot_all_rewards_overlay, plot_reward_vs_causal_metrics, plot_training_pair_metrics, plot_connectivity_heatmaps, plot_reward_vs_metrics, plot_top_vs_bottom_quartiles, plot_metric_correlations
 
 DEFAULT_SPIKE_PATHS = {
     "Baseline": "data/baseline_spike_data.pkl",
@@ -87,5 +87,30 @@ class OrgLearningEval:
     def show_architecture_map(self):
         plot_architecture_map(self.metadata)
 
-    def show_causal_metrics_plot(self, pattern_log):
-        plot_causal_metrics_vs_reward(self.causal_info, self.metadata, pattern_log)
+    def show_reward_vs_causal_plot(self, condition="Adaptive"):
+        pattern_log = self.log_data[condition]["pattern"]
+        return plot_reward_vs_causal_metrics(self.causal_info, pattern_log, return_df=True)
+
+    def show_training_pair_plot(self, num_neurons=10):
+        plot_training_pair_metrics(
+            self.causal_info["first_order_connectivity"],
+            self.causal_info["multi_order_connectivity"],
+            self.causal_info["burst_percent"],
+            num_neurons
+        )
+
+    def show_connectivity_heatmaps(self):
+        plot_connectivity_heatmaps(
+            self.causal_info["first_order_connectivity"],
+            self.causal_info["multi_order_connectivity"]
+        )
+
+    def show_metric_scatter_plots(self, df):
+        plot_reward_vs_metrics(df)
+
+    def show_quartile_comparison_plot(self, df):
+        plot_top_vs_bottom_quartiles(df)
+
+    def show_metric_correlation_plot(self, df):
+        plot_metric_correlations(df)
+
