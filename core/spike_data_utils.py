@@ -1,8 +1,370 @@
 # spike_data_utils.py - Utilities for SpikeData analysis
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
+from scipy.stats import spearmanr
+from typing import List, Tuple
+from scipy import ndimage
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from collections import Counter
 
 def calculate_mean_firing_rates(spike_data):
     return np.array([
         len(neuron_spikes) / (spike_data.length / 1000)
         for neuron_spikes in spike_data.train
     ])
+
+def compute_instantaneous_firing_rate(spike_data, duration_ms=None, sigma=50):
+    """Compute smoothed instantaneous firing rates from SpikeData."""
+    idces, times = spike_data.idces_times()
+    times = times.astype(int)
+
+    if duration_ms is None:
+        duration_ms = int(np.max(times)) + 1
+
+    n_units = int(np.max(idces)) + 1
+    rate_mat = np.zeros((duration_ms, n_units))
+
+    for unit in range(n_units):
+        spk_times = times[idces == unit]
+        if len(spk_times) < 2:
+            continue
+        isi = np.diff(spk_times)
+        isi = np.insert(isi, 0, np.nan)
+        isi_rate = 1.0 / isi
+
+        series = np.zeros(duration_ms)
+        for i in range(1, len(spk_times)):
+            start = spk_times[i - 1]
+            end = spk_times[i]
+            if end >= duration_ms:
+                break
+            series[start:end] = isi_rate[i]
+
+        smoothed = 1000 * gaussian_filter1d(series, sigma=sigma)
+        rate_mat[:, unit] = smoothed
+
+    return rate_mat
+
+def detect_population_bursts(spike_data, bin_size_ms=10, smooth_sigma=2, threshold_std=2.0, min_duration_ms=30):
+    """
+    Detect bursts based on smoothed population firing rate.
+
+    Parameters:
+        spike_data: SpikeData object
+        bin_size_ms: bin size for population rate
+        smooth_sigma: Gaussian filter sigma in bins
+        threshold_std: threshold for burst detection (in std units above baseline)
+        min_duration_ms: minimum duration for a valid burst
+
+    Returns:
+        List of dicts: [{"start": t_start, "end": t_end, "t_peak": peak_time}, ...]
+    """
+    times, rates = spike_data.population_firing_rate(bin_size=bin_size_ms, w=1, average=True)
+    smoothed = ndimage.gaussian_filter1d(rates, sigma=smooth_sigma)
+
+    baseline = np.median(smoothed)
+    std_dev = np.std(smoothed)
+    thresh = baseline + threshold_std * std_dev
+
+    above_thresh = smoothed > thresh
+    labeled, num = ndimage.label(above_thresh)
+
+    bursts = []
+    for i in range(1, num + 1):
+        mask = labeled == i
+        if mask.sum() == 0:
+            continue
+        start_idx, end_idx = np.where(mask)[0][[0, -1]]
+        start_time = times[start_idx]
+        end_time = times[end_idx]
+        duration = end_time - start_time
+        if duration < min_duration_ms:
+            continue
+        peak_idx = start_idx + np.argmax(smoothed[start_idx:end_idx + 1])
+        bursts.append({
+            "start": start_time,
+            "end": end_time,
+            "t_peak": times[peak_idx]
+        })
+
+    return bursts
+
+def extract_peak_times(spike_data, bursts: List[dict], unit_ids: List[int]) -> np.ndarray:
+    """
+    Extract peak times (1/ISI) for each unit across a list of burst windows.
+
+    Parameters:
+        spike_data: SpikeData instance
+        bursts: list of burst dicts with 'start' and 'end' or 't_peak'
+        unit_ids: neuron indices to include
+
+    Returns:
+        peak_time_matrix: shape [num_units, num_bursts]
+    """
+    peak_time_matrix = []
+
+    for unit in unit_ids:
+        peak_times = []
+        for burst in bursts:
+            spikes = spike_data.train[unit]
+            start, end = burst.get("start", 0), burst.get("end", spike_data.length)
+            spks = spikes[(spikes >= start) & (spikes <= end)]
+            if len(spks) < 2:
+                peak_times.append(np.nan)
+                continue
+            isi = np.diff(spks)
+            rate = 1 / isi
+            peak_idx = np.argmax(rate)
+            peak_time = spks[peak_idx]
+            peak_times.append(peak_time)
+        peak_time_matrix.append(peak_times)
+
+    return np.array(peak_time_matrix)
+
+
+def compute_rank_corr_and_zscores(peak_time_matrix: np.ndarray, num_shuffles: int = 100):
+    """
+    Compute Spearman rank-order correlation and z-scores across bursts.
+
+    Parameters:
+        peak_time_matrix: ndarray of shape [units, bursts], can contain NaNs
+        num_shuffles: number of shuffles to build null distribution
+
+    Returns:
+        rho_matrix: Spearman correlation matrix [bursts x bursts]
+        zscore_matrix: Z-scored matrix based on null distribution
+    """
+    # Original Spearman correlation across bursts (axis=0 = across units)
+    rho_matrix, _ = spearmanr(peak_time_matrix, axis=0, nan_policy='omit')
+
+    shuffled_rhos = []
+    for _ in range(num_shuffles):
+        shuffled = np.empty_like(peak_time_matrix)
+        for i in range(peak_time_matrix.shape[0]):
+            row = peak_time_matrix[i]
+            valid = ~np.isnan(row)
+            shuffled_row = row.copy()
+            shuffled_row[valid] = np.random.permutation(row[valid])
+            shuffled[i] = shuffled_row
+
+        shuff_rho, _ = spearmanr(shuffled, axis=0, nan_policy='omit')
+        shuffled_rhos.append(shuff_rho)
+
+    shuffled_rhos = np.array(shuffled_rhos)
+    mean_shuff = np.nanmean(shuffled_rhos, axis=0)
+    std_shuff = np.nanstd(shuffled_rhos, axis=0)
+    zscore_matrix = (rho_matrix - mean_shuff) / std_shuff
+
+    return rho_matrix, zscore_matrix
+
+def extract_aligned_spikes(spike_data, burst_windows, window_ms=1000):
+    """
+    Return a list of spike times for each neuron, aligned to burst onset (t=0).
+    Only spikes within ±window_ms around each burst onset are included.
+    """
+    aligned = [[] for _ in range(spike_data.N)]
+
+    for start, _ in burst_windows:
+        t0 = start  # burst onset in ms
+        win_start, win_end = t0 - window_ms // 2, t0 + window_ms // 2
+        sd_slice = spike_data.subtime(win_start, win_end)
+        for i, spikes in enumerate(sd_slice.train):
+            aligned[i].extend(spikes - (t0 - win_start))
+
+    return aligned  # List of N neurons, each with list of relative times
+
+def compute_normalized_firing_rate_matrix(aligned_spikes, duration_ms=1000, bin_size=10):
+    """
+    Returns: matrix (neurons x time_bins), each value normalized to [0, 1] per unit
+    """
+    num_neurons = len(aligned_spikes)
+    num_bins = duration_ms // bin_size
+    fr_matrix = np.zeros((num_neurons, num_bins))
+
+    for i, spikes in enumerate(aligned_spikes):
+        counts, _ = np.histogram(spikes, bins=num_bins, range=(0, duration_ms))
+        smoothed = ndimage.gaussian_filter1d(counts, sigma=1)
+        norm = smoothed / smoothed.max() if smoothed.max() > 0 else smoothed
+        fr_matrix[i] = norm
+
+    return fr_matrix
+
+def plot_backbone_aligned_heatmaps(aligned_spikes, fr_matrix, window_ms=1000, bin_size=10, burst_onset_ms=500):
+    fig, axs = plt.subplots(1, 2, figsize=(8, 6), gridspec_kw={'width_ratios': [1, 1.1]})
+
+    # LEFT: Raster Plot
+    axs[0].set_title("Aligned Spikes")
+    for i, spikes in enumerate(aligned_spikes):
+        axs[0].vlines(spikes, i + 0.5, i + 1.5, color='white', linewidth=0.3)
+    axs[0].axvline(burst_onset_ms, color='lime', linestyle='--', linewidth=1.2)
+    axs[0].set_xlim(0, window_ms)
+    axs[0].set_ylim(0.5, len(aligned_spikes) + 0.5)
+    axs[0].set_ylabel("Neuron ID")
+    axs[0].set_xlabel("Time (ms)")
+    axs[0].set_facecolor('black')
+
+    # RIGHT: Firing rate heatmap
+    axs[1].imshow(fr_matrix, aspect='auto', cmap='hot', interpolation='nearest', extent=[0, window_ms, 0, fr_matrix.shape[0]])
+    axs[1].axvline(burst_onset_ms, color='lime', linestyle='--', linewidth=1.2)
+    axs[1].set_title("Norm. Firing Rate")
+    axs[1].set_xlabel("Time (ms)")
+    axs[1].tick_params(left=False)
+
+    # SCALE BAR
+    scale_len = 500
+    scale_y = -5
+    axs[1].add_patch(patches.Rectangle((window_ms - scale_len - 20, scale_y), scale_len, 2, color='black'))
+    axs[1].text(window_ms - scale_len // 2 - 20, scale_y - 5, "500 ms", ha='center')
+
+    plt.tight_layout()
+    plt.show()
+
+def analyze_burst_distributions(spike_data, condition_label, burst_func, **kwargs):
+    bursts = burst_func(spike_data, **kwargs)  # use extract_population_bursts or burst_detection
+    durations = [end - start for start, end in bursts]
+    freq = len(bursts) / (spike_data.length / 1000)  # bursts per second
+
+    plt.figure(figsize=(10, 4))
+    plt.subplot(1, 2, 1)
+    plt.hist(durations, bins=30, color='gray')
+    plt.xlabel('Burst Duration (ms)')
+    plt.ylabel('Count')
+    plt.title(f'{condition_label}: Burst Durations')
+
+    plt.subplot(1, 2, 2)
+    plt.bar([condition_label], [freq])
+    plt.ylabel('Burst Frequency (Hz)')
+    plt.title(f'{condition_label}: Burst Frequency')
+    plt.tight_layout()
+    plt.show()
+
+    return {
+        "durations_ms": durations,
+        "burst_rate_Hz": freq,
+        "burst_count": len(bursts)
+    }
+
+def analyze_within_burst_firing(spike_data, bursts, bin_size=20):
+    rates = []
+    for start, end in bursts:
+        sub_sd = spike_data.subtime(start, end)
+        raster = sub_sd.raster(bin_size)
+        rates.append(raster.sum(axis=0))  # total population rate
+
+    rates = np.array(rates)
+    avg_rate = rates.mean(axis=0)
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(np.arange(avg_rate.size) * bin_size, avg_rate)
+    plt.xlabel('Time in Burst (ms)')
+    plt.ylabel('Mean Population Firing Rate')
+    plt.title('Average Within-Burst Dynamics')
+    plt.tight_layout()
+    plt.show()
+
+    return avg_rate
+
+def analyze_latency_consistency(spike_data, bursts):
+    all_latencies = []
+    for start, _ in bursts:
+        latencies = [np.min(train[train >= start] - start) if np.any(train >= start) else np.nan for train in spike_data.train]
+        all_latencies.append(latencies)
+
+    latencies = np.array(all_latencies)
+    std_dev = np.nanstd(latencies, axis=0)
+
+    plt.figure(figsize=(8, 4))
+    plt.plot(std_dev)
+    plt.xlabel('Neuron Index')
+    plt.ylabel('Latency Std Dev (ms)')
+    plt.title('Burst Latency Consistency')
+    plt.tight_layout()
+    plt.show()
+
+    return std_dev
+
+def analyze_burst_propagation(spike_data, bursts):
+    coms = []
+    for start, end in bursts:
+        window = spike_data.subtime(start, end)
+        latencies = [np.min(t[t >= 0]) if len(t) > 0 else np.nan for t in window.train]
+        coms.append(latencies)
+
+    coms = np.array(coms)
+    com_mean = np.nanmean(coms, axis=0)
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(com_mean)
+    plt.xlabel('Neuron Index')
+    plt.ylabel('Mean First Spike Time (ms)')
+    plt.title('Burst Propagation Profile')
+    plt.tight_layout()
+    plt.show()
+
+    return com_mean
+
+def compute_latency_histograms(spike_data, window_ms=30, bin_size=5):
+    N = spike_data.N
+    histograms = {}
+    bin_edges = np.arange(-window_ms, window_ms + bin_size, bin_size)
+    for i in range(N):
+        spikes_i = spike_data.train[i]
+        for j in range(N):
+            if i == j:
+                continue
+            spikes_j = spike_data.train[j]
+            latencies = []
+            for t_i in spikes_i:
+                candidates = spikes_j[(spikes_j >= t_i - window_ms) & (spikes_j <= t_i + window_ms)]
+                latencies.extend(candidates - t_i)
+            hist, _ = np.histogram(latencies, bins=bin_edges)
+            histograms[(i, j)] = hist
+    return histograms, bin_edges
+
+def infer_causal_matrices(spike_data, max_latency_ms=200, bin_size=5):
+    """
+    Construct directional connection matrices from pairwise latency histograms.
+
+    Parameters:
+        spike_data: SpikeData object
+        max_latency_ms: latency window size for causal inference
+        bin_size: bin size used in latency histograms
+
+    Returns:
+        first_order: NxN matrix (direct causal links ±15 ms)
+        multi_order: NxN matrix (indirect links up to ±200 ms)
+    """
+    N = spike_data.N
+    latency_histograms, bin_edges = compute_latency_histograms(spike_data, window_ms=max_latency_ms, bin_size=bin_size)
+
+    center_bin = len(bin_edges) // 2
+    first_order = np.zeros((N, N))
+    multi_order = np.zeros((N, N))
+
+    for (i, j), hist in latency_histograms.items():
+        total = hist.sum()
+        if total == 0:
+            continue
+        probs = hist / total
+
+        lag_ms = bin_edges[:-1] + bin_size / 2
+        mean_latency = np.sum(lag_ms * probs)
+
+        # Fill in connectivity strength
+        multi_order[i, j] = mean_latency
+
+        # First-order: restrict to ±15 ms
+        if -15 <= mean_latency <= 15:
+            first_order[i, j] = mean_latency
+
+    return first_order, multi_order
+
+def compute_connection_strength_matrix(latency_histograms, bin_edges, latency_range=(5, 200)):
+    N = max(max(i, j) for i, j in latency_histograms.keys()) + 1
+    matrix = np.zeros((N, N))
+    for (i, j), hist in latency_histograms.items():
+        centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        mask = (centers >= latency_range[0]) & (centers <= latency_range[1])
+        matrix[i, j] = np.sum(hist[mask])
+    return matrix

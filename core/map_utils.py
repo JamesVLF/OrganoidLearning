@@ -169,3 +169,50 @@ def plot_architecture_map(metadata):
     ax.set_aspect('equal', adjustable='box')
     plt.tight_layout()
     plt.show()
+
+def plot_combined_electrode_neuron_map(metadata, show=True, ax=None, figsize=(10, 5)):
+    """
+    Plots a combined map of electrode roles and spike-localized neurons.
+    """
+    mapping = metadata['mapping']
+    encode_electrodes = metadata.get('encode_electrodes', [])
+    decode_electrodes = metadata.get('decode_electrodes', [])
+    training_electrodes = metadata.get('training_electrodes', [])
+    spike_locs = np.array(metadata.get('spike_locs', []))
+
+    if spike_locs.ndim != 2 or spike_locs.shape[1] != 2:
+        raise ValueError("metadata['spike_locs'] must be a list or array of (x, y) coordinates")
+
+
+    mapper = Mapping.from_df(mapping)
+    encode_pos = mapper.get_positions(electrodes=encode_electrodes)
+    decode_pos = mapper.get_positions(electrodes=decode_electrodes)
+    train_pos = mapper.get_positions(electrodes=training_electrodes)
+    all_pos = mapper.get_positions()
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    ax.scatter(all_pos[:, 0], all_pos[:, 1], s=2, label='Unused', zorder=-3)
+    ax.scatter(encode_pos[:, 0], encode_pos[:, 1], c='blue', label='Encode', s=60, marker='X', alpha=1)
+    ax.scatter(decode_pos[:, 0], decode_pos[:, 1], c='green', label='Decode', s=60,
+               marker='o', facecolors='none', linewidths=1.5)
+    ax.scatter(train_pos[:, 0], train_pos[:, 1], c='purple', label='Training', s=60,
+               marker='s', facecolors='none', linewidths=1.5)
+    ax.scatter(spike_locs[:, 0], spike_locs[:, 1], c='red', alpha=0.6, label='Neural Unit', zorder=-2)
+
+    ax.set_title('Electrode Roles on Array')
+    ax.set_xlabel('X Position (µm)')
+    ax.set_ylabel('Y Position (µm)')
+    ax.legend(loc='upper right')
+    ax.set_aspect('equal', adjustable='box')
+
+    if show:
+        plt.tight_layout()
+        plt.show()
+
+    return fig, ax
+
+
