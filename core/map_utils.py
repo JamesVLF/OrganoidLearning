@@ -127,10 +127,15 @@ class Mapping:
 
         return self.mapping[self.mapping['channel'].isin(channels)][['x', 'y']].values
 
+
+
+
     # ---- Save ----
     def save(self, filepath):
         with smart_open.open(filepath, 'w') as f:
             self.mapping.to_csv(f, index=False)
+
+
 
 
 # ==============================

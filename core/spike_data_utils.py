@@ -6,7 +6,7 @@ from typing import List, Tuple
 from scipy import ndimage
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from collections import Counter
+from spikedata.spikedata import SpikeData
 
 def calculate_mean_firing_rates(spike_data):
     return np.array([
@@ -305,21 +305,34 @@ def analyze_burst_propagation(spike_data, bursts):
     return com_mean
 
 def compute_latency_histograms(spike_data, window_ms=30, bin_size=5):
+    """
+    Compute pairwise latency histograms using SpikeData's latencies_to_index().
+
+    Parameters:
+        spike_data: SpikeData object
+        window_ms: Time window for latency consideration (±window_ms)
+        bin_size: Size of histogram bins in ms
+
+    Returns:
+        histograms: dict[(i, j)] -> histogram of latencies from unit i to j
+        bin_edges: edges of the latency histogram bins
+    """
     N = spike_data.N
     histograms = {}
     bin_edges = np.arange(-window_ms, window_ms + bin_size, bin_size)
+
     for i in range(N):
-        spikes_i = spike_data.train[i]
+        latencies_list = spike_data.latencies_to_index(i, window_ms=window_ms)
         for j in range(N):
             if i == j:
                 continue
-            spikes_j = spike_data.train[j]
-            latencies = []
-            for t_i in spikes_i:
-                candidates = spikes_j[(spikes_j >= t_i - window_ms) & (spikes_j <= t_i + window_ms)]
-                latencies.extend(candidates - t_i)
-            hist, _ = np.histogram(latencies, bins=bin_edges)
+            latencies = latencies_list[j]
+            if len(latencies) == 0:
+                hist = np.zeros(len(bin_edges) - 1)
+            else:
+                hist, _ = np.histogram(latencies, bins=bin_edges)
             histograms[(i, j)] = hist
+
     return histograms, bin_edges
 
 def infer_causal_matrices(spike_data, max_latency_ms=200, bin_size=5):
@@ -328,17 +341,21 @@ def infer_causal_matrices(spike_data, max_latency_ms=200, bin_size=5):
 
     Parameters:
         spike_data: SpikeData object
-        max_latency_ms: latency window size for causal inference
+        max_latency_ms: latency window size for causal inference (± max_latency_ms)
         bin_size: bin size used in latency histograms
 
     Returns:
-        first_order: NxN matrix (direct causal links ±15 ms)
-        multi_order: NxN matrix (indirect links up to ±200 ms)
+        first_order: NxN matrix (direct causal links within ±15 ms)
+        multi_order: NxN matrix (average latency within ±max_latency_ms)
     """
     N = spike_data.N
-    latency_histograms, bin_edges = compute_latency_histograms(spike_data, window_ms=max_latency_ms, bin_size=bin_size)
+    latency_histograms, bin_edges = compute_latency_histograms(
+        spike_data, window_ms=max_latency_ms, bin_size=bin_size
+    )
 
-    center_bin = len(bin_edges) // 2
+    # Define bin centers
+    lag_ms = (bin_edges[:-1] + bin_edges[1:]) / 2
+
     first_order = np.zeros((N, N))
     multi_order = np.zeros((N, N))
 
@@ -346,15 +363,14 @@ def infer_causal_matrices(spike_data, max_latency_ms=200, bin_size=5):
         total = hist.sum()
         if total == 0:
             continue
-        probs = hist / total
 
-        lag_ms = bin_edges[:-1] + bin_size / 2
+        probs = hist / total
         mean_latency = np.sum(lag_ms * probs)
 
-        # Fill in connectivity strength
+        # Multi-order matrix: average latency in full range
         multi_order[i, j] = mean_latency
 
-        # First-order: restrict to ±15 ms
+        # First-order matrix: direct causal links within ±15 ms
         if -15 <= mean_latency <= 15:
             first_order[i, j] = mean_latency
 
