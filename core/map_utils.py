@@ -16,8 +16,10 @@ except ImportError:
 # Mapping Class
 # ==============================
 class Mapping:
+    """
+    Wrapper for Maxwell mapping metadata, with electrode-channel conversions and accessors.
+    """
     def __init__(self, filepath=None, df=None, from_csv=False, channels=None):
-        """Initialize Mapping from a file or DataFrame."""
         self.mapping = None
         self.selected_electrodes = []
         self.selected_channels = []
@@ -29,11 +31,10 @@ class Mapping:
             else:
                 self.mapping = data_loader.load_mapping_maxwell(filepath, channels)
         elif isinstance(df, pd.DataFrame):
-            self.mapping = df
+            self.mapping = df.copy()
 
         self.set_mapping(self.mapping)
 
-    # ---- Factory methods ----
     @classmethod
     def from_csv(cls, filepath):
         return cls(filepath, from_csv=True)
@@ -46,22 +47,6 @@ class Mapping:
     def from_maxwell(cls, filepath, channels=None):
         return cls(filepath, channels=channels)
 
-    # ---- Selection methods ----
-    def select_electrodes(self, electrodes):
-        self.selected_electrodes = electrodes
-        self.selected_channels = [
-            int(self.mapping[self.mapping['electrode'] == e]['channel'].values[0])
-            for e in electrodes
-        ]
-
-    def select_channels(self, channels):
-        self.selected_channels = channels
-        self.selected_electrodes = [
-            int(self.mapping[self.mapping['channel'] == ch]['electrode'].values[0])
-            for ch in channels
-        ]
-
-    # ---- Configuration ----
     def set_mapping(self, mapping):
         if mapping is None:
             print("No mapping provided")
@@ -72,19 +57,31 @@ class Mapping:
         self.channels = mapping['channel'].astype(int).tolist()
         self.electrodes = mapping['electrode'].astype(int).tolist()
 
-    # ---- Conversion ----
-    def get_electrodes(self, channels=None):
-        channels = self.channels if channels is None else [channels] if isinstance(channels, int) else channels
-        return [
-            int(self.mapping[self.mapping['channel'] == ch]['electrode'].values[0])
-            for ch in channels
-        ]
+    def save(self, filepath):
+        with smart_open.open(filepath, 'w') as f:
+            self.mapping.to_csv(f, index=False)
 
+    # ---------------------------
+    # Conversion + Access
+    # ---------------------------
     def get_channels(self, electrodes=None):
-        electrodes = self.electrodes if electrodes is None else [electrodes] if isinstance(electrodes, int) else electrodes
+        if electrodes is None:
+            electrodes = self.electrodes
+        elif isinstance(electrodes, int):
+            electrodes = [electrodes]
         return [
             int(self.mapping[self.mapping['electrode'] == elec]['channel'].values[0])
             for elec in electrodes
+        ]
+
+    def get_electrodes(self, channels=None):
+        if channels is None:
+            channels = self.channels
+        elif isinstance(channels, int):
+            channels = [channels]
+        return [
+            int(self.mapping[self.mapping['channel'] == ch]['electrode'].values[0])
+            for ch in channels
         ]
 
     def get_orig_channels(self, channels=None, electrodes=None):
@@ -94,6 +91,16 @@ class Mapping:
             return [int(self.mapping[self.mapping['electrode'] == elec]['orig_channel'].values[0]) for elec in electrodes]
         else:
             return self.mapping['orig_channel'].astype(int).tolist()
+
+    def get_positions(self, channels=None, electrodes=None):
+        if channels is not None and electrodes is not None:
+            raise ValueError("Provide either channels or electrodes, not both.")
+        if electrodes is not None:
+            channels = self.get_channels(electrodes)
+        elif channels is None:
+            return self.mapping[['x', 'y']].values
+
+        return self.mapping[self.mapping['channel'].isin(channels)][['x', 'y']].values
 
     def get_nearest(self, channel=None, electrode=None, n=None, distance=None):
         if channel is None and electrode is None:
@@ -117,31 +124,23 @@ class Mapping:
         nearest_channels = [ch for ch, _ in channel_distances[:n] if n is not None or True]
         return self.get_electrodes(nearest_channels) if electrode is not None else nearest_channels
 
-    def get_positions(self, channels=None, electrodes=None):
-        if channels is not None and electrodes is not None:
-            raise ValueError("Provide either channels or electrodes, not both.")
-        if electrodes is not None:
-            channels = self.get_channels(electrodes)
-        elif channels is None:
-            return self.mapping[['x', 'y']].values
+    def select_electrodes(self, electrodes):
+        self.selected_electrodes = electrodes
+        self.selected_channels = self.get_channels(electrodes)
 
-        return self.mapping[self.mapping['channel'].isin(channels)][['x', 'y']].values
-
-
-
-
-    # ---- Save ----
-    def save(self, filepath):
-        with smart_open.open(filepath, 'w') as f:
-            self.mapping.to_csv(f, index=False)
-
-
+    def select_channels(self, channels):
+        self.selected_channels = channels
+        self.selected_electrodes = self.get_electrodes(channels)
 
 
 # ==============================
 # Visualization Functions
 # ==============================
+
 def plot_architecture_map(metadata):
+    """
+    Show encoder/decoder/training electrodes + neuron positions.
+    """
     mapping = metadata['mapping']
     encode_electrodes = metadata['encode_electrodes']
     decode_electrodes = metadata['decode_electrodes']
@@ -149,45 +148,38 @@ def plot_architecture_map(metadata):
     spike_locs = np.array(metadata['spike_locs'])
 
     mapper = Mapping.from_df(mapping)
-    encode_positions = mapper.get_positions(electrodes=encode_electrodes)
-    decode_positions = mapper.get_positions(electrodes=decode_electrodes)
-    training_positions = mapper.get_positions(electrodes=training_electrodes)
-    all_positions = mapper.get_positions()
-
-    spikes_x = spike_locs[:, 0]
-    spikes_y = spike_locs[:, 1]
+    encode_pos = mapper.get_positions(electrodes=encode_electrodes)
+    decode_pos = mapper.get_positions(electrodes=decode_electrodes)
+    train_pos = mapper.get_positions(electrodes=training_electrodes)
+    all_pos = mapper.get_positions()
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.scatter(all_positions[:, 0], all_positions[:, 1], s=2, label='Unused', zorder=-3)
-    ax.scatter(encode_positions[:, 0], encode_positions[:, 1], c='blue', label='Encode',
-               s=60, marker='X', alpha=1)
-    ax.scatter(decode_positions[:, 0], decode_positions[:, 1], c='g', label='Decode',
-               s=60, marker='o', alpha=0.8, facecolors='none', linewidths=1.5)
-    ax.scatter(training_positions[:, 0], training_positions[:, 1], c='purple', label='Training',
-               s=60, marker='s', alpha=0.8, facecolors='none', linewidths=1.5)
-    ax.scatter(spikes_x, spikes_y, label='Neural Unit', c='r', alpha=0.6, zorder=-2)
+    ax.scatter(all_pos[:, 0], all_pos[:, 1], s=2, label='Unused', zorder=-3)
+    ax.scatter(encode_pos[:, 0], encode_pos[:, 1], c='blue', label='Encode', s=60, marker='X')
+    ax.scatter(decode_pos[:, 0], decode_pos[:, 1], c='g', label='Decode', s=60, marker='o',
+               facecolors='none', linewidths=1.5)
+    ax.scatter(train_pos[:, 0], train_pos[:, 1], c='purple', label='Training', s=60, marker='s',
+               facecolors='none', linewidths=1.5)
+    ax.scatter(spike_locs[:, 0], spike_locs[:, 1], label='Neural Unit', c='r', alpha=0.6, zorder=-2)
 
     ax.set_title('Electrode Roles on Array')
-    ax.set_xlabel('X Position (µm)')
-    ax.set_ylabel('Y Position (µm)')
-    ax.legend(loc='upper right')
-    ax.set_aspect('equal', adjustable='box')
+    ax.set_xlabel('X (µm)')
+    ax.set_ylabel('Y (µm)')
+    ax.set_aspect('equal')
+    ax.legend()
     plt.tight_layout()
     plt.show()
 
+
 def plot_combined_electrode_neuron_map(metadata, show=True, ax=None, figsize=(10, 5)):
     """
-    Plots a combined map of electrode roles and spike-localized neurons.
+    Show neuron and electrode role overlay on same array.
     """
     mapping = metadata['mapping']
     encode_electrodes = metadata.get('encode_electrodes', [])
     decode_electrodes = metadata.get('decode_electrodes', [])
     training_electrodes = metadata.get('training_electrodes', [])
     spike_locs = np.array(metadata.get('spike_locs', []))
-
-    if spike_locs.ndim != 2 or spike_locs.shape[1] != 2:
-        raise ValueError("metadata['spike_locs'] must be a list or array of (x, y) coordinates")
-
 
     mapper = Mapping.from_df(mapping)
     encode_pos = mapper.get_positions(electrodes=encode_electrodes)
@@ -201,7 +193,7 @@ def plot_combined_electrode_neuron_map(metadata, show=True, ax=None, figsize=(10
         fig = ax.figure
 
     ax.scatter(all_pos[:, 0], all_pos[:, 1], s=2, label='Unused', zorder=-3)
-    ax.scatter(encode_pos[:, 0], encode_pos[:, 1], c='blue', label='Encode', s=60, marker='X', alpha=1)
+    ax.scatter(encode_pos[:, 0], encode_pos[:, 1], c='blue', label='Encode', s=60, marker='X')
     ax.scatter(decode_pos[:, 0], decode_pos[:, 1], c='green', label='Decode', s=60,
                marker='o', facecolors='none', linewidths=1.5)
     ax.scatter(train_pos[:, 0], train_pos[:, 1], c='purple', label='Training', s=60,
@@ -212,12 +204,49 @@ def plot_combined_electrode_neuron_map(metadata, show=True, ax=None, figsize=(10
     ax.set_xlabel('X Position (µm)')
     ax.set_ylabel('Y Position (µm)')
     ax.legend(loc='upper right')
-    ax.set_aspect('equal', adjustable='box')
+    ax.set_aspect('equal')
 
     if show:
         plt.tight_layout()
         plt.show()
 
     return fig, ax
+
+
+def plot_electrode_layout(mapping_df):
+    """
+    Basic scatterplot of all electrode positions.
+    """
+    x = mapping_df['x'].values
+    y = mapping_df['y'].values
+
+    plt.figure(figsize=(10, 5))
+    plt.scatter(x, y, s=2)
+    plt.xlabel('X Position (µm)')
+    plt.ylabel('Y Position (µm)')
+    plt.title("Electrode Layout")
+    plt.axis('equal')
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_neuron_layout(mapping_df, spike_locs):
+    """
+    Plot electrode layout + neuron spike locations.
+    """
+    x = mapping_df['x'].values
+    y = mapping_df['y'].values
+    spike_locs = np.array(spike_locs)
+
+    plt.figure(figsize=(10, 5))
+    plt.scatter(x, y, s=2, label="Electrodes")
+    plt.scatter(spike_locs[:, 0], spike_locs[:, 1], c='r', alpha=0.7, label="Neurons")
+    plt.xlabel('X Position (µm)')
+    plt.ylabel('Y Position (µm)')
+    plt.title("Electrode & Neuron Layout")
+    plt.legend()
+    plt.axis('equal')
+    plt.tight_layout()
+    plt.show()
 
 

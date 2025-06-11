@@ -4,6 +4,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter1d
 import networkx as nx
+from typing import Dict, Any, Optional, List, Tuple
+from pathlib import Path
+from scipy.stats import spearmanr
 
 
 def causal_plot(causal_info):
@@ -124,6 +127,13 @@ def compute_time_balanced_over_time(log_data, conditions, bin_size=60):
 
     return result
 
+def infer_firing_order(matrix):
+    """Compute net influence and firing order from a causal connectivity matrix."""
+    outgoing = np.sum(matrix, axis=1)
+    incoming = np.sum(matrix, axis=0)
+    net_score = outgoing - incoming
+    firing_order = np.argsort(-net_score)
+    return firing_order, net_score
 
 def infer_firing_order_enhanced(matrix, threshold=None, use_weights=True):
     """
@@ -342,3 +352,412 @@ def infer_firing_order_consensus(matrix, methods=None):
     consensus_order = np.argsort(consensus_scores)
 
     return consensus_order, consensus_scores, orders
+
+def run_comprehensive_firing_analysis(
+        first_order_matrix,
+        multi_order_matrix=None
+) -> Dict[str, Optional[Dict[str, Any]]]:
+    """
+    Run all available firing order inference methods on a causal matrix.
+    """
+
+    results = {}
+
+    try:
+        order, scores, details = infer_firing_order_enhanced(first_order_matrix)
+        results['enhanced'] = {'order': order, 'scores': scores, 'details': details}
+    except Exception as e:
+        print(f"[Enhanced] Failed: {e}")
+        results['enhanced'] = None
+
+    try:
+        order, scores = infer_firing_order_hierarchical(first_order_matrix)
+        results['hierarchical'] = {'order': order, 'scores': scores}
+    except Exception as e:
+        print(f"[Hierarchical] Failed: {e}")
+        results['hierarchical'] = None
+
+    try:
+        order, status = infer_firing_order_topological(first_order_matrix)
+        results['topological'] = {'order': order, 'status': status}
+    except Exception as e:
+        print(f"[Topological] Failed: {e}")
+        results['topological'] = None
+
+    if multi_order_matrix is not None:
+        try:
+            order, scores, details = infer_firing_order_temporal_chains(
+                first_order_matrix, multi_order_matrix)
+            results['temporal_chains'] = {'order': order, 'scores': scores, 'details': details}
+        except Exception as e:
+            print(f"[Temporal Chains] Failed: {e}")
+            results['temporal_chains'] = None
+
+    try:
+        consensus_order, consensus_scores, all_orders = infer_firing_order_consensus(first_order_matrix)
+        results['consensus'] = {
+            'order': consensus_order,
+            'scores': consensus_scores,
+            'all_methods': all_orders
+        }
+    except Exception as e:
+        print(f"[Consensus] Failed: {e}")
+        results['consensus'] = None
+
+    return results
+
+def create_condition_visualizations(
+        condition: str,
+        start_ms: int,
+        end_ms: int,
+        analysis_results: Dict[str, Optional[Dict[str, Any]]],
+        first_order_matrix: Any,
+        multi_order_matrix: Optional[Any],
+        save_dir: str
+) -> None:
+    """
+    Create and save visualizations from causal matrices and inferred firing orders.
+
+    Args:
+        condition: Name of the experimental condition.
+        start_ms: Start time of window (in ms).
+        end_ms: End time of window (in ms).
+        analysis_results: Dict of results from firing order inference.
+        first_order_matrix: Direct causal matrix.
+        multi_order_matrix: Optional multi-order causal matrix.
+        save_dir: Directory to save figures and reports.
+    """
+    from org_eval.viz.plots_general import (
+        create_directed_graph_from_consensus,
+        visualize_firing_graph,
+        create_multiple_graph_views,
+        analyze_graph_properties
+    )
+
+    if analysis_results.get('consensus') is None:
+        print(f"[{condition}] Skipped visualization - no consensus results.")
+        return
+
+    consensus_order = analysis_results['consensus']['order']
+    consensus_scores = analysis_results['consensus']['scores']
+
+    save_path = Path(save_dir)
+    save_path.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # Create directed graph
+        G = create_directed_graph_from_consensus(
+            consensus_order, consensus_scores, first_order_matrix
+        )
+
+        # Graph visualizations
+        for layout in ['spring', 'hierarchical', 'circular']:
+            fig = plt.figure(figsize=(12, 8))
+            visualize_firing_graph(G, layout=layout, save_path=save_path / f"graph_{layout}.png")
+            plt.close(fig)
+
+        if multi_order_matrix is not None:
+            fig = plt.figure(figsize=(16, 12))
+            create_multiple_graph_views(
+                consensus_order, consensus_scores,
+                first_order_matrix, first_order_matrix, multi_order_matrix
+            )
+            plt.savefig(save_path / "multiple_views.png", dpi=300, bbox_inches='tight')
+            plt.close(fig)
+
+        # Graph properties
+        properties = analyze_graph_properties(G)
+        with open(save_path / "graph_properties.txt", 'w') as f:
+            f.write(f"=== Graph Properties: {condition} {start_ms}-{end_ms} ms ===\n")
+            f.write(f"Firing order: {properties['firing_order']}\n")
+            f.write(f"Most influential neurons: {properties['influences'][:3]}\n")
+            f.write(f"Acyclic: {properties['is_acyclic']}\n")
+            f.write(f"Network density: {properties['density']:.3f}\n\n")
+
+            f.write("=== Method Comparison ===\n")
+            for method, result in analysis_results.items():
+                if result and 'order' in result:
+                    f.write(f"{method}: {result['order']}\n")
+
+        print(f"[{condition}] Visualizations saved to: {save_path}")
+
+    except Exception as e:
+        print(f"[{condition}] Visualization error: {e}")
+
+
+def generate_comparison_plots(
+        firing_order_results: Dict[str, Dict[str, Dict[str, Any]]],
+        time_windows: List[Tuple[int, int]],
+        save_dir: str
+) -> None:
+    """
+    Generate comparison plots across conditions and time windows.
+
+    Args:
+        firing_order_results: Nested dict of condition -> window_key -> method results.
+        time_windows: List of (start_ms, end_ms) tuples.
+        save_dir: Directory to save output figures.
+    """
+
+    print("\nGenerating comparison plots...")
+    comp_dir = Path(save_dir) / "comparisons"
+    comp_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        plot_firing_order_consistency(firing_order_results, time_windows, comp_dir)
+        plot_method_agreement(firing_order_results, time_windows, comp_dir)
+        plot_network_properties_comparison(firing_order_results, time_windows, comp_dir)
+    except Exception as e:
+        print(f"[Comparison Error] {e}")
+
+def plot_firing_order_consistency(
+        firing_order_results: Dict[str, Dict[str, Dict[str, Any]]],
+        time_windows: List[Tuple[int, int]],
+        save_dir: Path
+) -> None:
+    """
+    Plot consistency of consensus firing orders across time windows and conditions.
+
+    Args:
+        firing_order_results: Nested dict with consensus order data.
+        time_windows: List of (start_ms, end_ms) tuples.
+        save_dir: Path object to output directory.
+    """
+    fig, axes = plt.subplots(1, len(time_windows), figsize=(6 * len(time_windows), 8))
+    if len(time_windows) == 1:
+        axes = [axes]  # Ensure iterable
+
+    for i, (start_ms, end_ms) in enumerate(time_windows):
+        window_key = f"{start_ms}_{end_ms}"
+        orders_data, conditions = [], []
+
+        for condition, result_by_window in firing_order_results.items():
+            consensus = result_by_window.get(window_key, {}).get('consensus')
+            if consensus and 'order' in consensus:
+                orders_data.append(consensus['order'])
+                conditions.append(condition)
+
+        if orders_data:
+            orders_matrix = np.array(orders_data)
+            ax = axes[i]
+            im = ax.imshow(orders_matrix, aspect='auto', cmap='viridis')
+            ax.set_title(f'{start_ms}-{end_ms} ms')
+            ax.set_xlabel('Neuron Position')
+            ax.set_ylabel('Condition')
+            ax.set_yticks(range(len(conditions)))
+            ax.set_yticklabels(conditions)
+            plt.colorbar(im, ax=ax, label='Neuron Index')
+
+    plt.tight_layout()
+    out_path = Path(save_dir) / "firing_order_consistency.png"
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved firing order consistency plot to {out_path}")
+
+
+def plot_method_agreement(
+        firing_order_results: Dict[str, Dict[str, Dict[str, Any]]],
+        time_windows: List[Tuple[int, int]],
+        save_dir: Path,
+        methods: List[str] = None
+) -> None:
+    """
+    Plot agreement between different firing order inference methods.
+
+    Args:
+        firing_order_results: Nested dictionary of method outputs.
+        time_windows: List of (start_ms, end_ms) tuples.
+        save_dir: Path to save the plot.
+        methods: Optional list of methods to compare.
+    """
+    if methods is None:
+        methods = ['enhanced', 'hierarchical', 'topological', 'temporal_chains', 'consensus']
+    conditions = list(firing_order_results.keys())
+
+    n_rows, n_cols = len(time_windows), len(conditions)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows), squeeze=False)
+
+    for i, (start_ms, end_ms) in enumerate(time_windows):
+        window_key = f"{start_ms}_{end_ms}"
+
+        for j, condition in enumerate(conditions):
+            ax = axes[i][j]
+            results = firing_order_results.get(condition, {}).get(window_key, {})
+
+            agreement_matrix = np.zeros((len(methods), len(methods)))
+
+            for m1_idx, m1 in enumerate(methods):
+                for m2_idx, m2 in enumerate(methods):
+                    data1 = results.get(m1)
+                    data2 = results.get(m2)
+
+                    if data1 and data2:
+                        o1, o2 = data1.get('order'), data2.get('order')
+                        if o1 is not None and o2 is not None:
+                            try:
+                                corr, _ = spearmanr(o1, o2)
+                                agreement_matrix[m1_idx, m2_idx] = corr
+                            except Exception:
+                                match = np.mean(np.array(o1) == np.array(o2))
+                                agreement_matrix[m1_idx, m2_idx] = match
+
+            im = ax.imshow(agreement_matrix, cmap='RdYlBu_r', vmin=-1, vmax=1)
+            ax.set_title(f'{condition}\n{start_ms}-{end_ms} ms', fontsize=10)
+            ax.set_xticks(range(len(methods)))
+            ax.set_yticks(range(len(methods)))
+            ax.set_xticklabels(methods, rotation=45, ha='right', fontsize=8)
+            ax.set_yticklabels(methods, fontsize=8)
+
+            for mi in range(len(methods)):
+                for mj in range(len(methods)):
+                    ax.text(mj, mi, f'{agreement_matrix[mi, mj]:.2f}',
+                            ha='center', va='center', fontsize=7)
+
+    plt.tight_layout()
+    output_path = Path(save_dir) / "method_agreement.png"
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved method agreement plot to: {output_path}")
+
+def plot_network_properties_comparison(
+        graph_properties: Dict[str, Dict[str, Dict[str, float]]],
+        time_windows: List[Tuple[int, int]],
+        save_dir: Path
+) -> None:
+    """
+    Visual comparison of network properties (density, acyclicity, etc.)
+    across conditions and time windows.
+
+    Args:
+        graph_properties: Nested dict {condition -> {window_key -> metrics_dict}}
+        time_windows: List of (start_ms, end_ms) windows
+        save_dir: Path where plot will be saved
+    """
+
+    conditions = list(graph_properties.keys())
+    metrics = ['density', 'is_acyclic']  # Add more if needed
+
+    fig, axes = plt.subplots(len(metrics), 1, figsize=(10, 5 * len(metrics)))
+
+    for m_idx, metric in enumerate(metrics):
+        ax = axes[m_idx] if len(metrics) > 1 else axes
+        for condition in conditions:
+            values = []
+            labels = []
+            for (start_ms, end_ms) in time_windows:
+                window_key = f"{start_ms}_{end_ms}"
+                props = graph_properties.get(condition, {}).get(window_key, {})
+                if metric in props:
+                    values.append(props[metric])
+                    labels.append(f"{start_ms}-{end_ms}")
+            ax.plot(labels, values, label=condition, marker='o')
+
+        ax.set_title(f"Comparison of {metric.replace('_', ' ').title()} Across Conditions")
+        ax.set_xlabel("Time Window (ms)")
+        ax.set_ylabel(metric.replace('_', ' ').title())
+        ax.legend()
+        ax.grid(True)
+
+    plt.tight_layout()
+    output_file = Path(save_dir) / "network_properties_comparison.png"
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved network properties comparison plot to {output_file}")
+
+
+def run_all_firing_order_analyses(
+        first_order_matrix: np.ndarray,
+        multi_order_matrix: Optional[np.ndarray] = None
+) -> Dict[str, Optional[Dict[str, Any]]]:
+    """
+    Runs multiple firing order inference methods on causal connectivity matrices.
+
+    Args:
+        first_order_matrix: NxN matrix of immediate causal links
+        multi_order_matrix: NxN matrix of extended causal relationships (optional)
+
+    Returns:
+        Dictionary mapping method names to their results or None if failed.
+    """
+
+    results: Dict[str, Optional[Dict[str, Any]]] = {}
+
+    try:
+        order, scores, details = infer_firing_order_enhanced(first_order_matrix)
+        results['enhanced'] = {'order': order, 'scores': scores, 'details': details}
+    except Exception as e:
+        print(f"[ERROR] Enhanced method failed: {e}")
+        results['enhanced'] = None
+
+    try:
+        order, scores = infer_firing_order_hierarchical(first_order_matrix)
+        results['hierarchical'] = {'order': order, 'scores': scores}
+    except Exception as e:
+        print(f"[ERROR] Hierarchical method failed: {e}")
+        results['hierarchical'] = None
+
+    try:
+        order, status = infer_firing_order_topological(first_order_matrix)
+        results['topological'] = {'order': order, 'status': status}
+    except Exception as e:
+        print(f"[ERROR] Topological method failed: {e}")
+        results['topological'] = None
+
+    if multi_order_matrix is not None:
+        try:
+            order, scores, details = infer_firing_order_temporal_chains(
+                first_order_matrix, multi_order_matrix
+            )
+            results['temporal_chains'] = {
+                'order': order, 'scores': scores, 'details': details
+            }
+        except Exception as e:
+            print(f"[ERROR] Temporal chains method failed: {e}")
+            results['temporal_chains'] = None
+
+    try:
+        consensus_order, consensus_scores, all_orders = infer_firing_order_consensus(
+            first_order_matrix
+        )
+        results['consensus'] = {
+            'order': consensus_order,
+            'scores': consensus_scores,
+            'all_methods': all_orders
+        }
+    except Exception as e:
+        print(f"[ERROR] Consensus method failed: {e}")
+        results['consensus'] = None
+
+    return results
+
+def _analyze_single_condition_window(self, condition, start_ms, end_ms, save_dir):
+    """
+    Analyze firing order for a single condition and time window
+    """
+
+    # Get causal matrices for this condition and time window
+    first_order_key = (condition, start_ms, end_ms, 'first_order')
+    multi_order_key = (condition, start_ms, end_ms, 'multi_order')
+
+    # Check if matrices exist, if not compute them
+    if first_order_key not in self.causal_latency_matrices:
+        self._compute_causal_matrices(condition, start_ms, end_ms)
+
+    first_order_matrix = self.causal_latency_matrices.get(first_order_key)
+    multi_order_matrix = self.multi_order_matrices.get(multi_order_key)
+
+    if first_order_matrix is None:
+        raise ValueError(f"Could not compute causal matrices for {condition} {start_ms}-{end_ms}")
+
+    # Run comprehensive firing order analysis
+    analysis_results = self._run_comprehensive_analysis(
+        first_order_matrix, multi_order_matrix
+    )
+
+    # Create and save visualizations
+    self._create_condition_visualizations(
+        condition, start_ms, end_ms, analysis_results,
+        first_order_matrix, multi_order_matrix, save_dir
+    )
+
+    return analysis_results

@@ -9,6 +9,7 @@ from typing import Dict
 import networkx as nx
 from spikedata.spikedata import SpikeData
 
+
 def plot_raster(spike_data, title="Spike Raster", start=0, end=None):
     idces, times = spike_data.idces_times()
     if end is None:
@@ -585,6 +586,14 @@ def causal_plot_from_matrices(first_order, multi_order, title="", training_inds=
         first_order = first_order[np.ix_(training_inds, training_inds)]
         multi_order = multi_order[np.ix_(training_inds, training_inds)]
 
+    # Print first-order latency values only (nonzero entries)
+    print(f"\nFirst-Order Weighted Latencies (±15 ms) — {title}")
+    for i in range(first_order.shape[0]):
+        for j in range(first_order.shape[1]):
+            latency = first_order[i, j]
+            if latency != 0:
+                print(f"  [{i}, {j}] = {latency:.2f} ms")
+
     fig, axs = plt.subplots(1, 2, figsize=(10, 4))
     fig.suptitle(title)
 
@@ -602,6 +611,71 @@ def causal_plot_from_matrices(first_order, multi_order, title="", training_inds=
 
     plt.tight_layout()
     plt.show()
+
+def causal_plot_from_matrices_counts(first_order, multi_order, title="", training_inds=None, vmin=None, vmax=None):
+    """
+    Plot causal connectivity heatmaps (Baseline-style).
+
+    Parameters:
+        first_order: np.ndarray
+        multi_order: np.ndarray
+        title: str
+        training_inds: list of neuron indices (subset)
+        vmin/vmax: for color scaling
+    """
+    if training_inds is not None:
+        first_order = first_order[np.ix_(training_inds, training_inds)]
+        multi_order = multi_order[np.ix_(training_inds, training_inds)]
+
+    fig, axs = plt.subplots(1, 2, figsize=(10, 4))
+    fig.suptitle(title, fontsize=14)
+
+    im1 = axs[0].imshow(first_order, cmap="Greens", vmin=vmin, vmax=vmax)
+    axs[0].set_title("First Order (±15 ms)")
+    axs[0].set_xlabel("Reactivity Index")
+    axs[0].set_ylabel("Stimulus Index")
+    fig.colorbar(im1, ax=axs[0], shrink=0.8)
+
+    im2 = axs[1].imshow(multi_order, cmap="Greens", vmin=vmin, vmax=vmax)
+    axs[1].set_title("Multi-Order (±200 ms)")
+    axs[1].set_xlabel("Reactivity Index")
+    axs[1].set_ylabel("Stimulus Index")
+    fig.colorbar(im2, ax=axs[1], shrink=0.8)
+
+    plt.tight_layout()
+    plt.show()
+
+def plot_order_on_array(matrix, coords, title="", top_n=None):
+    """Plot inferred firing order overlaid on spatial coordinates."""
+    from org_eval.core.analysis_utils import infer_firing_order
+    order, score = infer_firing_order(matrix)
+    score = np.clip(score, a_min=0, a_max=None)
+    norm_score = (score - score.min()) / (score.ptp() + 1e-9)
+
+    if top_n:
+        indices = order[:top_n]
+    else:
+        indices = order
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for idx in indices:
+        x, y = coords[idx]
+        ax.scatter(x, y, color=plt.cm.plasma(norm_score[idx]), s=100)
+        ax.text(x + 1, y + 1, str(idx), fontsize=9)
+
+    for i in range(len(indices) - 1):
+        xi, yi = coords[indices[i]]
+        xj, yj = coords[indices[i + 1]]
+        ax.annotate("", xy=(xj, yj), xytext=(xi, yi),
+                    arrowprops=dict(arrowstyle="->", color="red", lw=1.5))
+
+    ax.set_title(title)
+    ax.set_xlabel("X (µm)")
+    ax.set_ylabel("Y (µm)")
+    ax.set_aspect("equal")
+    ax.grid(True)
+    plt.tight_layout()
+    return fig
 
 def plot_training_spatial_connectivity_all_conditions(ole, spikes_x, spikes_y, electrode_mapping):
     """
@@ -731,12 +805,6 @@ def plot_spatial_connectivity_map(matrix, positions, title="Spatial Connectivity
     plt.title(title)
     plt.tight_layout()
     plt.show()
-
-import numpy as np
-import matplotlib.pyplot as plt
-import networkx as nx
-from matplotlib.colors import LinearSegmentedColormap
-import seaborn as sns
 
 def create_directed_graph_from_consensus(consensus_order, consensus_scores,
                                          causal_matrix, threshold=None,
@@ -1017,6 +1085,74 @@ def analyze_graph_properties(G):
         'density': nx.density(G)
     }
 
+
+def plot_firing_sttc_combined(matrix, sttc, coords, title="", top_n=None, sttc_threshold=0.2):
+    """
+    Overlay firing order arrows and STTC connection strength lines on neuron positions.
+
+    Parameters:
+        matrix : NxN causal matrix (restricted to training neurons)
+        sttc : NxN STTC matrix (same shape as matrix)
+        coords : Nx2 array of (x, y) neuron positions (training neurons only)
+        title : str
+        top_n : int or None
+        sttc_threshold : float
+    """
+    from org_eval.core.analysis_utils import infer_firing_order
+
+    firing_order, score = infer_firing_order(matrix)
+    score = np.clip(score, a_min=0, a_max=None)
+    norm_score = (score - score.min()) / (score.ptp() + 1e-9)
+
+    # Ensure the indices stay within local (0–N) range
+    firing_order = np.asarray(firing_order)
+    firing_order = firing_order[firing_order < len(coords)]
+
+    if top_n is not None:
+        indices = firing_order[:top_n]
+    else:
+        indices = firing_order
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+
+    # STTC connections (local index space only)
+    for i in range(len(indices)):
+        for j in range(i + 1, len(indices)):
+            ni, nj = indices[i], indices[j]
+            if ni >= sttc.shape[0] or nj >= sttc.shape[1]:
+                continue  # skip out-of-bound indices
+            strength = sttc[ni, nj]
+            if strength >= sttc_threshold:
+                xi, yi = coords[ni]
+                xj, yj = coords[nj]
+                line_width = 0.5 + 4.5 * strength  # match visual scaling
+                ax.plot([xi, xj], [yi, yj], linewidth=line_width, color='gray', alpha=0.6)
+
+    # Firing order visualization
+    for idx in indices:
+        if idx >= len(coords):
+            continue
+        x, y = coords[idx]
+        ax.scatter(x, y, color=plt.cm.plasma(norm_score[idx]), s=120, zorder=2)
+        ax.text(x + 1, y + 1, str(idx), fontsize=9)
+
+    for i in range(len(indices) - 1):
+        if indices[i] >= len(coords) or indices[i + 1] >= len(coords):
+            continue
+        xi, yi = coords[indices[i]]
+        xj, yj = coords[indices[i + 1]]
+        ax.annotate("",
+                    xy=(xj, yj), xytext=(xi, yi),
+                    arrowprops=dict(arrowstyle="->", color="red", lw=1.5), zorder=3)
+
+    ax.set_title(title)
+    ax.set_xlabel("X (µm)")
+    ax.set_ylabel("Y (µm)")
+    ax.set_aspect("equal")
+    ax.grid(True)
+    plt.tight_layout()
+    plt.show()
+
 # Example usage
 def example_usage():
     """
@@ -1044,3 +1180,102 @@ def example_usage():
     properties = analyze_graph_properties(G)
 
     return G, properties
+
+def plot_firing_order_overlay(matrix, coords, title="", neuron_labels=None):
+    """
+    Plot neuron firing order overlaid on spatial coordinates.
+
+    Parameters:
+        matrix : NxN array
+            Causal influence matrix (restricted to task neurons).
+        coords : Nx2 array
+            Spatial coordinates for the corresponding neurons.
+        title : str
+            Title for the plot.
+        neuron_labels : list or array
+            Optional list of neuron IDs for labeling.
+    """
+    from org_eval.core.analysis_utils import infer_firing_order
+
+    order, score = infer_firing_order(matrix)
+    score = np.clip(score, a_min=0, a_max=None)
+    norm_score = (score - score.min()) / (score.ptp() + 1e-9)
+
+    if neuron_labels is None:
+        neuron_labels = list(range(len(coords)))
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    for idx in order:
+        x, y = coords[idx]
+        label = str(neuron_labels[idx])
+        ax.scatter(x, y, color=plt.cm.plasma(norm_score[idx]), s=120, edgecolor='black', linewidth=0.5, zorder=2)
+        ax.text(x + 3, y + 3, label, fontsize=9, color='black',
+                bbox=dict(facecolor='white', edgecolor='none', pad=1), zorder=3)
+
+    for i in range(len(order) - 1):
+        xi, yi = coords[order[i]]
+        xj, yj = coords[order[i + 1]]
+        ax.annotate("",
+                    xy=(xj, yj), xytext=(xi, yi),
+                    arrowprops=dict(arrowstyle="->", color="red", lw=2, shrinkA=3, shrinkB=3),
+                    zorder=3)
+
+    ax.set_title(title)
+    ax.set_xlabel("X (µm)")
+    ax.set_ylabel("Y (µm)")
+    ax.set_aspect("equal")
+    ax.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+def analyze_firing_orders_all_conditions(self, time_windows=None, save_dir=None):
+    """
+    Analyze firing orders for all conditions across multiple time windows
+
+    Parameters:
+    -----------
+    time_windows : list of tuples
+        List of (start_ms, end_ms) time windows to analyze
+        Default: [(0, 300000), (600000, 900000)]
+    save_dir : str
+        Directory to save results and plots
+    """
+
+    if time_windows is None:
+        time_windows = [(0, 300000), (600000, 900000)]
+
+    if save_dir is None:
+        save_dir = "firing_order_analysis"
+
+    # Store results
+    self.firing_order_results = {}
+
+    print(f"Analyzing firing orders for {len(self.spike_data)} conditions...")
+    print(f"Time windows: {time_windows}")
+
+    for condition in self.spike_data.keys():
+        print(f"\n=== Analyzing condition: {condition} ===")
+        self.firing_order_results[condition] = {}
+
+        for start_ms, end_ms in time_windows:
+            window_key = f"{start_ms}_{end_ms}"
+            print(f"  Time window: {start_ms}-{end_ms} ms")
+
+            try:
+                # Analyze this condition and time window
+                results = self._analyze_single_condition_window(
+                    condition, start_ms, end_ms, save_dir
+                )
+
+                self.firing_order_results[condition][window_key] = results
+
+            except Exception as e:
+                print(f"    Error analyzing {condition} {window_key}: {e}")
+                continue
+
+    # Generate comparison plots
+    self._generate_comparison_plots(time_windows, save_dir)
+
+    print(f"\nAnalysis complete! Results saved to: {save_dir}")
+    return self.firing_order_results

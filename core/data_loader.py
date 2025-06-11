@@ -180,3 +180,51 @@ def mat_to_spikeData(mat_path):
     units = [i[0][0]*1e3 for i in mat['spike_times']]
     sd = SpikeData(units)
     return sd
+
+def inspect_dataset(condition, data_dict):
+    """
+    Prints basic information about a spike dataset.
+
+    Parameters:
+    - condition (str): Dataset key to inspect (e.g., 'Baseline').
+    - data_dict (dict): Dictionary containing SpikeData instances.
+    """
+    if condition not in data_dict:
+        print(f"[ERROR] Condition '{condition}' not found in provided data.")
+        return
+
+    sd = data_dict[condition]
+    try:
+        unit_ids, spike_times = sd.idces_times()
+    except Exception as e:
+        print(f"[WARNING] Could not extract unit IDs or spike times: {e}")
+        unit_ids, spike_times = [], []
+
+    print("\n--- Dataset Inspection ---")
+    print(f"Condition           : {condition}")
+    print(f"Number of Neurons   : {sd.N}")
+    print(f"Recording Length    : {sd.length / 1000:.2f} seconds")
+    print(f"Sample Unit IDs     : {unit_ids[:10]}")
+    print(f"Sample Spike Times  : {spike_times[:10]}")
+    print(f"Available Attributes: {dir(sd)}")
+    print("-----------------------------")
+
+
+def inspect_datasets(conditions=None, data_dict=None):
+    """
+    Inspects one, multiple, or all datasets.
+
+    Parameters:
+    - conditions (str, list, or None): Dataset condition(s) to inspect.
+    - data_dict (dict): Dictionary containing all loaded datasets.
+    """
+    if not data_dict:
+        print("No datasets loaded.")
+        return
+
+    # Normalize input
+    conditions = normalize_conditions(conditions, data_dict)
+
+    for condition in conditions:
+        inspect_dataset(condition, data_dict)
+        print("-" * 50)

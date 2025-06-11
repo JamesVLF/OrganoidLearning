@@ -304,58 +304,71 @@ def analyze_burst_propagation(spike_data, bursts):
 
     return com_mean
 
-def compute_latency_histograms(spike_data, window_ms=30, bin_size=5):
+def compute_latency_histograms(spike_data, window_ms=200, bin_size=5, neuron_ids=None):
     """
-    Compute pairwise latency histograms using SpikeData's latencies_to_index().
+    Compute latency histograms for specified neuron pairs.
 
     Parameters:
         spike_data: SpikeData object
-        window_ms: Time window for latency consideration (±window_ms)
-        bin_size: Size of histogram bins in ms
+        window_ms: latency window in ms
+        bin_size: bin width
+        neuron_ids: optional list of neuron indices to restrict analysis
 
     Returns:
-        histograms: dict[(i, j)] -> histogram of latencies from unit i to j
-        bin_edges: edges of the latency histogram bins
+        histograms: dict[(i, j)] -> histogram array
+        bin_edges: np.ndarray
     """
     N = spike_data.N
+    if neuron_ids is None:
+        neuron_ids = list(range(N))
+
     histograms = {}
     bin_edges = np.arange(-window_ms, window_ms + bin_size, bin_size)
 
-    for i in range(N):
+    for i in neuron_ids:
         latencies_list = spike_data.latencies_to_index(i, window_ms=window_ms)
-        for j in range(N):
+
+        for j_idx, j in enumerate(neuron_ids):
             if i == j:
                 continue
+
+            # j_idx is used to index into latencies_list (which is ordered by all N)
+            if j >= len(latencies_list):
+                continue
+
             latencies = latencies_list[j]
             if len(latencies) == 0:
                 hist = np.zeros(len(bin_edges) - 1)
             else:
                 hist, _ = np.histogram(latencies, bins=bin_edges)
+
             histograms[(i, j)] = hist
 
     return histograms, bin_edges
 
-def infer_causal_matrices(spike_data, max_latency_ms=200, bin_size=5):
+def infer_causal_matrices(spike_data, max_latency_ms=200, bin_size=5, neuron_ids=None):
     """
     Construct directional connection matrices from pairwise latency histograms.
+    Categorized by weighted mean latency.
 
     Parameters:
         spike_data: SpikeData object
         max_latency_ms: latency window size for causal inference (± max_latency_ms)
         bin_size: bin size used in latency histograms
+        neuron_ids: optional list of neurons to compute causal relationships between
 
     Returns:
         first_order: NxN matrix (direct causal links within ±15 ms)
         multi_order: NxN matrix (average latency within ±max_latency_ms)
     """
-    N = spike_data.N
     latency_histograms, bin_edges = compute_latency_histograms(
-        spike_data, window_ms=max_latency_ms, bin_size=bin_size
+        spike_data, window_ms=max_latency_ms, bin_size=bin_size, neuron_ids=neuron_ids
     )
 
     # Define bin centers
     lag_ms = (bin_edges[:-1] + bin_edges[1:]) / 2
 
+    N = spike_data.N
     first_order = np.zeros((N, N))
     multi_order = np.zeros((N, N))
 
@@ -376,6 +389,38 @@ def infer_causal_matrices(spike_data, max_latency_ms=200, bin_size=5):
 
     return first_order, multi_order
 
+def infer_causal_matrices_counts(spike_data, latency_window_first=(-15, 15), latency_window_multi=(-200, 200)):
+    """
+    Construct directional connection matrices based on raw latency counts (baseline-consistent).
+
+    Parameters:
+        spike_data: SpikeData object
+        latency_window_first: Tuple[int, int], window for first-order (e.g. ±15 ms)
+        latency_window_multi: Tuple[int, int], window for multi-order (e.g. ±200 ms)
+
+    Returns:
+        first_order: NxN matrix (latency counts in ±15 ms)
+        multi_order: NxN matrix (latency counts in ±200 ms)
+    """
+    N = spike_data.N
+    first_order = np.zeros((N, N), dtype=int)
+    multi_order = np.zeros((N, N), dtype=int)
+
+    for i in range(N):
+        latencies_to_i = spike_data.latencies_to_index(i)
+        for j in range(N):
+            lats = latencies_to_i[j]
+            if not lats:
+                continue
+
+            multi_hits = [lat for lat in lats if latency_window_multi[0] < lat < latency_window_multi[1]]
+            first_hits = [lat for lat in lats if latency_window_first[0] < lat < latency_window_first[1]]
+
+            multi_order[i, j] = len(multi_hits)
+            first_order[i, j] = len(first_hits)
+
+    return first_order, multi_order
+
 def compute_connection_strength_matrix(latency_histograms, bin_edges, latency_range=(5, 200)):
     N = max(max(i, j) for i, j in latency_histograms.keys()) + 1
     matrix = np.zeros((N, N))
@@ -384,3 +429,84 @@ def compute_connection_strength_matrix(latency_histograms, bin_edges, latency_ra
         mask = (centers >= latency_range[0]) & (centers <= latency_range[1])
         matrix[i, j] = np.sum(hist[mask])
     return matrix
+
+def get_sttc(sd, neuron_ids):
+    """
+    Returns STTC matrix for selected neuron IDs.
+
+    Parameters:
+        sd : SpikeData
+        neuron_ids : list of int
+    Returns:
+        NxN numpy array of STTC values for selected neurons
+    """
+    if not neuron_ids:
+        raise ValueError("No neuron IDs provided.")
+
+    subset_sd = sd.subset(neuron_ids)
+    sttc = subset_sd.spike_time_tilings()
+    return np.nan_to_num(sttc)
+
+def compute_sttc_for_condition(self, condition, start_ms=0, end_ms=None):
+    """
+    Compute STTC matrix for task neurons in a given condition and time window.
+    """
+
+    if end_ms is None:
+        end_ms = self.spike_data[condition].length
+
+    sd = self.spike_data[condition].subtime(start_ms, end_ms)
+    neuron_ids = self.metadata["task_neuron_ids"]
+
+    sttc_matrix = get_sttc(sd, neuron_ids)
+    key = (condition, start_ms, end_ms)
+    self.sttc_matrices[key] = sttc_matrix
+
+def plot_sttc_matrix(sd, neuron_ids, title="STTC Matrix"):
+    sttc = get_sttc(sd, neuron_ids)
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(sttc, vmin=0, vmax=1, cmap="viridis")
+    ax.set_xlabel("Neuron Index")
+    ax.set_ylabel("Neuron Index")
+    ax.set_title(title)
+    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    plt.show()
+
+def plot_sttc_spatial(sd, neuron_ids, coords, threshold=0.1, title="STTC Spatial Connectivity"):
+    sttc = get_sttc(sd, neuron_ids)
+    coords = np.array(coords)
+
+    fig, axs = plt.subplots(1, 2, figsize=(14, 6))
+
+    print("Max STTC:", np.max(sttc))  # See overall range of values
+
+    # Electrode layout with neuron connections
+    axs[0].scatter(coords[:, 0], coords[:, 1], c='red', label='Task Neurons')
+    for i in range(len(neuron_ids)):
+        for j in range(i + 1, len(neuron_ids)):
+            strength = sttc[i, j]
+            print(f"STTC[{i}, {j}] = {strength:.2f}")
+
+            if strength >= threshold - 1e-6:
+                xi, yi = coords[i]
+                xj, yj = coords[j]
+                linewidth = 1.0 + 6.0 * strength
+                axs[0].plot([xi, xj], [yi, yj], linewidth=linewidth, color='black', alpha=0.7)
+
+    axs[0].set_title("Spatial Connectivity (STTC ≥ {:.2f})".format(threshold))
+    axs[0].set_xlabel("X (µm)")
+    axs[0].set_ylabel("Y (µm)")
+    axs[0].set_aspect("equal")
+    axs[0].legend()
+
+    # STTC heatmap
+    im = axs[1].imshow(sttc, vmin=0, vmax=1, cmap="viridis")
+    axs[1].set_title("STTC Matrix")
+    axs[1].set_xlabel("Neuron Index")
+    axs[1].set_ylabel("Neuron Index")
+    fig.colorbar(im, ax=axs[1], fraction=0.046, pad=0.04)
+
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.show()
