@@ -36,12 +36,16 @@ class OrgLearningEval:
         self.spike_paths = spike_paths or DEFAULT_SPIKE_PATHS
         self.log_paths = log_paths or DEFAULT_LOG_PATHS
 
-        self.spike_data = load_spike_data(self.spike_paths)
         self.log_data = load_log_data(self.log_paths)
         self.causal_info = load_causal_info()
         self.metadata = load_metadata()
+        self.spike_data = load_spike_data(self.spike_paths)
 
+        # Load mapping
         mapping_df = self.metadata["mapping"]
+        mapper = core.map_utils.Mapping.from_df(mapping_df)
+
+        # Get electrode groups
         training_electrodes = self.metadata["training_electrodes"]
         encode_electrodes = self.metadata["encode_electrodes"]
         decode_electrodes = self.metadata["decode_electrodes"]
@@ -52,10 +56,39 @@ class OrgLearningEval:
                 [("decode", e) for e in decode_electrodes]
         )
 
+        # Convert task electrodes to corresponding channels
+        valid_electrodes = list({e for _, e in all_task_electrodes})
+        try:
+            valid_channels = mapper.get_channels(valid_electrodes)
+        except Exception as e:
+            print(f"[ERROR] Failed to map electrodes to channels: {e}")
+            valid_channels = []
+
+        # Filter SpikeData to include only units with channel IDs matching task channels
+        for label, sd in self.spike_data.items():
+            try:
+                unit_ids, spike_times = sd.idces_times()
+                filtered_unit_ids = []
+                filtered_spike_times = []
+
+                for uid, times in zip(unit_ids, spike_times):
+                    if uid in valid_channels:
+                        filtered_unit_ids.append(uid)
+                        filtered_spike_times.append(times)
+
+                if filtered_unit_ids:
+                    self.spike_data[label] = sd.__class__.from_idces_times(filtered_unit_ids, filtered_spike_times)
+                    print(f"[INFO] Filtered {label} SpikeData to {len(filtered_unit_ids)} matching channels.")
+                else:
+                    print(f"[WARNING] No matching channels found in {label} data.")
+
+            except Exception as e:
+                print(f"[ERROR] Filtering {label} SpikeData failed: {e}")
+
+        # Build task_neuron_info (keys = channel IDs)
         self.task_neuron_info = {}
-        # Flatten spike_channels into a single list
-        raw_spike_channels = self.metadata["spike_channels"]
-        spike_channels = [ch for sublist in raw_spike_channels for ch in sublist]
+        spike_channels = [ch for sublist in self.metadata["spike_channels"] for ch in sublist]
+        self.spike_channels = spike_channels
 
         for role, electrode in all_task_electrodes:
             match = mapping_df[mapping_df["electrode"] == electrode]
@@ -63,9 +96,8 @@ class OrgLearningEval:
                 row = match.iloc[0]
                 neuron_channel = int(row["channel"])
                 if neuron_channel in spike_channels:
-                    neuron_idx = spike_channels.index(neuron_channel)
                     x, y = row["x"], row["y"]
-                    self.task_neuron_info[neuron_idx] = {
+                    self.task_neuron_info[neuron_channel] = {
                         "electrode": electrode,
                         "role": role,
                         "x": x,
@@ -76,14 +108,33 @@ class OrgLearningEval:
             else:
                 print(f"[WARNING] Electrode {electrode} not found in mapping.")
 
-        # Set default spike dataset
+        # Force add channel 909 (if not present)
+        try:
+            row = mapping_df[mapping_df["electrode"] == 909].iloc[0]
+            neuron_channel = 909
+            if neuron_channel not in self.task_neuron_info:
+                self.task_neuron_info[neuron_channel] = {
+                    "electrode": 909,
+                    "role": "training",
+                    "x": row["x"],
+                    "y": row["y"]
+                }
+                print(f"[INFO] Forced inclusion of channel 909 (electrode 909)")
+        except Exception:
+            print("[WARNING] Could not force-add channel 909")
+
+        # Set baseline spike data
         if "Baseline" in self.spike_data:
             self.sd_main = self.spike_data["Baseline"]
             print("Loaded default dataset: 'Baseline'")
         else:
             raise ValueError("Baseline dataset not found in spike_data.")
 
-        self.task_neuron_inds = sorted(self.task_neuron_info.keys())
+        # Confirm which neurons exist in spike data
+        unit_ids, _ = self.sd_main.idces_times()
+        self.task_neuron_inds = sorted([
+            nid for nid in self.task_neuron_info if nid in unit_ids
+        ])
         print("Task Neuron Indices in Data:", self.task_neuron_inds)
 
         self.task_neuron_coords = np.array([
@@ -264,32 +315,42 @@ class OrgLearningEval:
     def show_burst_raster(self, start_time=0, end_time=None):
         viz.plots_general.plot_raster_pretty(self.sd_main, l1=start_time, l2=end_time or (self.sd_main.length / 1000), analyze=True)
 
-    def show_neuron_raster_comparison(self, task_neuron_rank=0, start_s=0, end_s=20):
+    def show_neuron_raster_comparison(self, neuron_id=None, task_neuron_rank=None, start_s=0, end_s=20):
         """
-        Show stacked spike raster plots for a task neuron (by rank in task list) across conditions.
-        """
-        if task_neuron_rank >= len(self.task_neuron_inds):
-            raise IndexError(f"Invalid rank: {task_neuron_rank}. Only {len(self.task_neuron_inds)} task neurons.")
+        Show stacked spike raster plots for a given neuron across conditions.
 
-        # Retrieve actual unit ID corresponding to the task neuron
-        neuron_id = self.task_neuron_inds[task_neuron_rank]
+        You can specify:
+        - `task_neuron_rank`: index into self.task_neuron_inds (e.g., 0 for the first task neuron)
+        - `neuron_id`: an explicit neuron ID (unit ID in the spike data)
+
+        One of these must be provided.
+        """
+        if neuron_id is None:
+            if task_neuron_rank is None:
+                raise ValueError("Must provide either `neuron_id` or `task_neuron_rank`.")
+            if task_neuron_rank >= len(self.task_neuron_inds):
+                raise IndexError(f"Invalid rank: {task_neuron_rank}. Only {len(self.task_neuron_inds)} task neurons.")
+            neuron_id = self.task_neuron_inds[task_neuron_rank]
 
         # Confirm neuron ID exists in the spike data
-        all_unit_ids = self.sd_main.idces_times()[0]
+        all_unit_ids, _ = self.sd_main.idces_times()
         if neuron_id not in all_unit_ids:
-            raise ValueError(f"Neuron ID {neuron_id} not found in spike data unit IDs: {all_unit_ids}")
+            raise ValueError(f"Neuron ID {neuron_id} not found in spike data unit IDs.")
 
+        # Prepare datasets
         spike_datasets = []
         for condition in ["Adaptive", "Random", "Null"]:
             if condition in self.spike_data:
                 spike_datasets.append((condition, self.spike_data[condition]))
 
+        # Plot
         viz.plots_general.plot_neuron_raster_comparison_stacked(
             spike_datasets,
             neuron_id=neuron_id,
             start_s=start_s,
             end_s=end_s
         )
+
     def compute_latency_histograms(self, window_ms=30, bin_size=5):
         for cond, sd in self.spike_data.items():
             histograms, bins = core.spike_data_utils.compute_latency_histograms(sd, window_ms, bin_size)
