@@ -704,25 +704,32 @@ class OrgLearningEval:
 
     def show_firing_order_overlay(self, condition, start_ms, end_ms):
         """
-        Show firing order overlay for the task neurons (stim + encode + training)
-        in a given condition and time window.
+        Show firing order overlay for training neurons in the given condition and time window.
         """
         from viz.plots_general import plot_firing_order_overlay
 
         key = (condition, start_ms, end_ms)
         matrix = self.causal_latency_matrices.get(key)
         if matrix is None:
-            raise ValueError(f"Causal matrix not found for {key}")
+            print(f"[WARNING] Causal matrix not found for {key}. Skipping.")
+            return
 
-        task_ids = self.task_neuron_inds  # use unified list of task neurons
-        coords = np.array(self.metadata["spike_locs"])[task_ids]
-        matrix_task = matrix[np.ix_(task_ids, task_ids)]
+        unit_ids, _ = self.sd_main.idces_times()
+        training_inds = [
+            uid for uid, info in self.task_neuron_info.items()
+            if info["role"] == "training" and uid in unit_ids
+        ]
+        coords = np.array([
+            [self.task_neuron_info[uid]["x"], self.task_neuron_info[uid]["y"]]
+            for uid in training_inds
+        ])
+        matrix_task = matrix[np.ix_(training_inds, training_inds)]
 
         plot_firing_order_overlay(
             matrix_task,
             coords,
             title=f"Firing Order - {condition} ({start_ms}-{end_ms} ms)",
-            neuron_labels=task_ids
+            neuron_labels=training_inds
         )
 
 

@@ -1184,18 +1184,12 @@ def example_usage():
 def plot_firing_order_overlay(matrix, coords, title="", neuron_labels=None):
     """
     Plot neuron firing order overlaid on spatial coordinates.
-
-    Parameters:
-        matrix : NxN array
-            Causal influence matrix (restricted to task neurons).
-        coords : Nx2 array
-            Spatial coordinates for the corresponding neurons.
-        title : str
-            Title for the plot.
-        neuron_labels : list or array
-            Optional list of neuron IDs for labeling.
     """
     from org_eval.core.analysis_utils import infer_firing_order
+
+    if matrix.size == 0 or coords.shape[0] == 0:
+        print("[WARNING] Empty matrix or coordinates passed to plot_firing_order_overlay. Skipping plot.")
+        return
 
     order, score = infer_firing_order(matrix)
     score = np.clip(score, a_min=0, a_max=None)
@@ -1209,7 +1203,8 @@ def plot_firing_order_overlay(matrix, coords, title="", neuron_labels=None):
     for idx in order:
         x, y = coords[idx]
         label = str(neuron_labels[idx])
-        ax.scatter(x, y, color=plt.cm.plasma(norm_score[idx]), s=120, edgecolor='black', linewidth=0.5, zorder=2)
+        ax.scatter(x, y, color=plt.cm.plasma(norm_score[idx]), s=120,
+                   edgecolor='black', linewidth=0.5, zorder=2)
         ax.text(x + 3, y + 3, label, fontsize=9, color='black',
                 bbox=dict(facecolor='white', edgecolor='none', pad=1), zorder=3)
 
