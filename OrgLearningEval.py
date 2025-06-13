@@ -436,6 +436,10 @@ class OrgLearningEval:
             title: str
             arrow_width: float – base width of arrows
         """
+        # Fix: convert numpy array to list
+        if isinstance(firing_order, np.ndarray):
+            firing_order = firing_order.tolist()
+
         mapping_df = self.metadata["mapping"].set_index("channel")
         coords = []
         used_unit_ids = []
@@ -480,7 +484,6 @@ class OrgLearningEval:
             except ValueError:
                 continue
 
-            # Dynamically scale arrow width
             scaled_width = arrow_width * (0.6 + sttc_val)
 
             plt.arrow(
@@ -504,7 +507,6 @@ class OrgLearningEval:
                 "sttc_score": round(sttc_val, 4)
             })
 
-        # Annotate start and end
         plt.text(float(coords[0, 0]), float(coords[0, 1]), "Start", fontsize=8, color="green")
         plt.text(float(coords[-1, 0]), float(coords[-1, 1]), "End", fontsize=8, color="red")
 
