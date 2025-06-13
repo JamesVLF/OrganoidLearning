@@ -424,15 +424,17 @@ class OrgLearningEval:
         plt.tight_layout()
         plt.show()
 
-    def plot_firing_order_spatial_with_sttc(self, firing_order, sttc_matrix, title="Firing Order with STTC", arrow_width=0.005):
+    def plot_firing_order_spatial_with_sttc(self, firing_order, sttc_matrix,
+                                            title="Firing Order with STTC",
+                                            arrow_width=0.004):
         """
-        Plot neuron firing order using spatial coordinates and color-coded arrows by STTC.
+        Plot neuron firing order using spatial coordinates and STTC-colored arrows.
 
         Parameters:
-            firing_order (list or np.ndarray): Ordered list of unit_ids from most to least influential.
-            sttc_matrix (np.ndarray): NxN STTC matrix between unit_ids.
-            title (str): Plot title.
-            arrow_width (float): Width of the arrows.
+            firing_order: list of unit indices (ordered firing)
+            sttc_matrix: np.ndarray – square STTC matrix (same order as firing_order)
+            title: str
+            arrow_width: float – base width of arrows
         """
         mapping_df = self.metadata["mapping"].set_index("channel")
         coords = []
@@ -448,16 +450,16 @@ class OrgLearningEval:
                 missing_units.append(unit_id)
 
         if missing_units:
-            print(f" Warning: {len(missing_units)} unit IDs not found in mapping and were skipped.")
+            print(f"  {len(missing_units)} unit(s) missing from mapping: {missing_units}")
 
         coords = np.array(coords)
         cmap = get_cmap("plasma")
-        norm = Normalize(vmin=0, vmax=1)  # STTC values range from 0 to 1
+        norm = Normalize(vmin=0, vmax=1)
 
         summary_rows = []
 
         plt.figure(figsize=(8, 6))
-        plt.scatter(coords[:, 0], coords[:, 1], c=np.arange(len(coords)), cmap="viridis", s=50)
+        plt.scatter(coords[:, 0], coords[:, 1], c=np.arange(len(coords)), cmap="viridis", s=40)
         plt.title(title)
         plt.xlabel("X")
         plt.ylabel("Y")
@@ -469,19 +471,22 @@ class OrgLearningEval:
             x1, y1 = coords[i + 1]
             dx, dy = x1 - x0, y1 - y0
 
-            # Find index positions for STTC matrix lookup
             try:
-                idx_source = self.sd_main.unit_ids.index(source_id)
-                idx_target = self.sd_main.unit_ids.index(target_id)
+                idx_source = firing_order.index(source_id)
+                idx_target = firing_order.index(target_id)
                 sttc_val = sttc_matrix[idx_source, idx_target]
+                if np.isnan(sttc_val):
+                    continue
             except ValueError:
-                sttc_val = np.nan
+                continue
 
-            # Plot arrow with STTC-colored magnitude
+            # Dynamically scale arrow width
+            scaled_width = arrow_width * (0.6 + sttc_val)
+
             plt.arrow(
                 x0, y0, dx, dy,
-                head_width=arrow_width * 50,
-                head_length=arrow_width * 50,
+                head_width=scaled_width * 100,
+                head_length=scaled_width * 100,
                 fc=cmap(norm(sttc_val)),
                 ec=cmap(norm(sttc_val)),
                 linewidth=1.0,
@@ -499,6 +504,7 @@ class OrgLearningEval:
                 "sttc_score": round(sttc_val, 4)
             })
 
+        # Annotate start and end
         plt.text(float(coords[0, 0]), float(coords[0, 1]), "Start", fontsize=8, color="green")
         plt.text(float(coords[-1, 0]), float(coords[-1, 1]), "End", fontsize=8, color="red")
 
@@ -510,9 +516,9 @@ class OrgLearningEval:
         plt.show()
 
         summary_df = pd.DataFrame(summary_rows)
-
         display(summary_df)
         return summary_df
+
 
     def compare_causal_matrices(
             self,
