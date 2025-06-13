@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from matplotlib.cm import get_cmap
 from matplotlib.colors import Normalize
 from IPython.display import display
-from scipy.stats import spearmanr, pearsonr
+from scipy.stats import spearmanr, pearsonr, wilcoxon
 from core.data_loader import load_spike_data, load_log_data, load_causal_info, load_metadata, label_task_units
 from core.spike_data_utils import calculate_mean_firing_rates
 from core.analysis_utils import get_correlation_matrix
@@ -54,6 +54,8 @@ class OrgLearningEval:
         self.causal_latency_matrices = {}
         self.multi_order_matrices = {}
         self.sttc_matrices = {}
+        self.latency_change_cache = {}
+
 
     def set_dataset(self, name):
         if name in self.spike_data:
@@ -436,7 +438,7 @@ class OrgLearningEval:
             title: str
             arrow_width: float – base width of arrows
         """
-        # Fix: convert numpy array to list
+        # Ensure firing_order is a list
         if isinstance(firing_order, np.ndarray):
             firing_order = firing_order.tolist()
 
@@ -461,19 +463,18 @@ class OrgLearningEval:
         norm = Normalize(vmin=0, vmax=1)
 
         summary_rows = []
+        fig, ax = plt.subplots(figsize=(8, 6))
+        sc = ax.scatter(coords[:, 0], coords[:, 1], c=np.arange(len(coords)), cmap="viridis", s=40)
 
-        plt.figure(figsize=(8, 6))
-        plt.scatter(coords[:, 0], coords[:, 1], c=np.arange(len(coords)), cmap="viridis", s=40)
-        plt.title(title)
-        plt.xlabel("X")
-        plt.ylabel("Y")
+        ax.set_title(title)
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
 
         for i in range(len(coords) - 1):
             source_id = used_unit_ids[i]
             target_id = used_unit_ids[i + 1]
             x0, y0 = coords[i]
             x1, y1 = coords[i + 1]
-            dx, dy = x1 - x0, y1 - y0
 
             try:
                 idx_source = firing_order.index(source_id)
@@ -486,16 +487,16 @@ class OrgLearningEval:
 
             scaled_width = arrow_width * (0.6 + sttc_val)
 
-            plt.arrow(
-                x0, y0, dx, dy,
-                head_width=scaled_width * 100,
-                head_length=scaled_width * 100,
-                fc=cmap(norm(sttc_val)),
-                ec=cmap(norm(sttc_val)),
-                linewidth=1.0,
-                alpha=0.9,
-                length_includes_head=True
-            )
+            # Use annotate for proper arrows
+            ax.annotate("",
+                        xy=(x1, y1), xytext=(x0, y0),
+                        arrowprops=dict(
+                            arrowstyle="->",
+                            color=cmap(norm(sttc_val)),
+                            lw=2,
+                            alpha=0.9
+                        )
+                        )
 
             summary_rows.append({
                 "source_unit": source_id,
@@ -507,13 +508,15 @@ class OrgLearningEval:
                 "sttc_score": round(sttc_val, 4)
             })
 
-        plt.text(float(coords[0, 0]), float(coords[0, 1]), "Start", fontsize=8, color="green")
-        plt.text(float(coords[-1, 0]), float(coords[-1, 1]), "End", fontsize=8, color="red")
+        # Annotate start and end
+        ax.text(float(coords[0, 0]), float(coords[0, 1]), "Start", fontsize=8, color="green")
+        ax.text(float(coords[-1, 0]), float(coords[-1, 1]), "End", fontsize=8, color="red")
 
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
-        plt.colorbar(sm, label="STTC Score")
-        plt.grid(True, linestyle="--", alpha=0.3)
+        plt.colorbar(sm, ax=ax, label="STTC Score")
+
+        ax.grid(True, linestyle="--", alpha=0.3)
         plt.tight_layout()
         plt.show()
 
@@ -598,20 +601,30 @@ class OrgLearningEval:
 
         return (diff, stats, sig_mask) if perform_stats else (diff, stats)
 
-    def segment_and_compute_causal(self, condition, bin_size_s=60, max_latency_ms=200, bin_size=5, order="first", unit_ids=None):
+    def segment_and_compute_causal(
+            self,
+            condition,
+            bin_size_s=60,
+            max_latency_ms=200,
+            bin_size=5,
+            order="first",
+            unit_ids=None
+    ):
         """
-        Segment a dataset into time bins and compute causal matrices for each.
+        Segment a dataset into time bins and compute causal and STTC matrices.
 
         Returns:
-            List of matrices with format: [(start, end, matrix), ...]
+            List of tuples: [(start, end, causal_matrix), ...]
         """
         sd = self.spike_data[condition]
-        total_ms = sd.length
+        total_ms = int(sd.length)
         bin_ms = bin_size_s * 1000
         segments = []
 
         for start in range(0, total_ms, bin_ms):
             end = min(start + bin_ms, total_ms)
+
+            # Compute causal matrices
             self.compute_causal_matrices(
                 condition=condition,
                 start_ms=start,
@@ -621,13 +634,24 @@ class OrgLearningEval:
                 unit_ids=unit_ids
             )
 
+            # Retrieve causal matrix
             key = (condition, start, end)
-            matrix = (
+            causal_matrix = (
                 self.causal_latency_matrices[key]
                 if order == "first"
                 else self.multi_order_matrices[key]
             )
-            segments.append((start, end, matrix))
+
+            # Cache STTC matrix
+            sd_window = self.spike_data[condition].subtime(start, end)
+            if unit_ids is not None:
+                sd_window = sd_window.select_units(unit_ids)
+
+            sttc_matrix = sd_window.spike_time_tilings()
+            self.sttc_matrices[key] = sttc_matrix
+
+            # Store segment tuple
+            segments.append((start, end, causal_matrix))
 
         return segments
 
@@ -673,78 +697,234 @@ class OrgLearningEval:
             "significant": is_significant
         }
 
-    def analyze_all_latency_changes(
+    def segment_and_compute_sttc(self, condition, bin_size_s=60, unit_ids=None):
+        """
+        Segment the dataset and compute STTC matrices per bin.
+        Returns: list of (start, end, matrix)
+        """
+        sd = self.spike_data[condition]
+        total_ms = int(sd.length)
+        bin_ms = bin_size_s * 1000
+        segments = []
+
+        for start in range(0, total_ms, bin_ms):
+            end = min(start + bin_ms, total_ms)
+            sd_window = sd.subtime(start, end)
+            if unit_ids:
+                sd_window = sd_window.select_units(unit_ids)
+            sttc = sd_window.spike_time_tilings()
+            segments.append((start, end, sttc))
+
+        return segments
+
+    def analyze_all_connection_changes(
             self,
             bin_size_s=60,
             order="first",
             unit_ids=None,
             min_corr_diff=0.3,
-            conditions=("Adaptive", "Baseline", "Null")
+            zscore_thresh=1.5,
+            baseline_sttc_thresh=0.2,
+            smooth=True,
+            smooth_window=3,
+            conditions=("Adaptive", "Null", "Random"),
+            cache_key="connection_strengthening"
     ):
         """
-        Analyze causal latency change over time for all neuron pairs, comparing Adaptive to controls.
+        Analyze both causal latency and STTC changes over time, comparing Adaptive vs controls.
 
         Parameters:
-            bin_size_s: int – size of each time window in seconds
-            order: str – 'first' or 'multi'
-            unit_ids: list – unit IDs to restrict analysis (default: all)
-            min_corr_diff: float – threshold to flag adaptive changes as significant
-            conditions: tuple – conditions to compare, where the first is "Adaptive"
+            bin_size_s (int): Segment size in seconds.
+            order (str): "first" or "multi" latency matrix.
+            unit_ids (list): Subset of unit IDs.
+            min_corr_diff (float): Correlation delta threshold for divergence.
+            zscore_thresh (float): Z-score threshold for trend stability.
+            baseline_sttc_thresh (float): Minimum baseline STTC to include pair.
+            smooth (bool): Apply temporal smoothing.
+            smooth_window (int): Window size for smoothing.
+            conditions (tuple): Conditions to compare.
+            cache_key (str): Save results under this key.
 
         Returns:
-            results: list of dicts with change metrics for each neuron pair
+            results (list of dicts): Each dict summarizes a pair's metrics.
         """
+        from scipy.stats import wilcoxon
+        from scipy.ndimage import uniform_filter1d
+
         if len(conditions) < 2:
-            raise ValueError("Must provide at least one control condition along with Adaptive")
+            raise ValueError("Must provide Adaptive and at least one control condition")
 
         cond_adaptive = conditions[0]
         control_conditions = conditions[1:]
 
-        # Step 1: Segment and compute matrices
-        print("Segmenting and computing causal matrices...")
-        segmented_data = {
+        # Step 1: Segment and compute both latency and STTC matrices
+        print("Segmenting and computing matrices...")
+        segmented_latency = {
             cond: self.segment_and_compute_causal(
-                cond,
-                bin_size_s=bin_size_s,
-                order=order,
-                unit_ids=unit_ids
+                cond, bin_size_s=bin_size_s, order=order, unit_ids=unit_ids
             ) for cond in conditions
         }
 
-        # Step 2: Extract time series
-        print("Extracting pairwise latency time series...")
-        pairwise_ts = {
-            cond: self.extract_pairwise_timeseries(matrices)
-            for cond, matrices in segmented_data.items()
+        segmented_sttc = {
+            cond: self.segment_and_compute_sttc(
+                cond, bin_size_s=bin_size_s, unit_ids=unit_ids
+            ) for cond in conditions
         }
 
-        # Step 3: Analyze all pairs
-        print("Analyzing changes in latency trajectories...")
-        all_pairs = list(pairwise_ts[cond_adaptive].keys())
+        # Step 2: Extract pairwise time series
+        print("Extracting time series...")
+        ts_latency = {cond: self.extract_pairwise_timeseries(seg) for cond, seg in segmented_latency.items()}
+        ts_sttc = {cond: self.extract_pairwise_timeseries(seg) for cond, seg in segmented_sttc.items()}
+        self.ts_latency = ts_latency
+        self.ts_sttc = ts_sttc
+
+        # Step 3: Analyze each pair
+        print("Analyzing pairs...")
         results = []
+        all_pairs = list(ts_latency[cond_adaptive].keys())
 
         for pair in all_pairs:
-            adaptive_ts = pairwise_ts[cond_adaptive][pair]
-            control_ts_dict = {}
-
             try:
-                for cond in control_conditions:
-                    ctrl_ts = pairwise_ts[cond][pair]
-                    control_ts_dict[cond] = ctrl_ts
+                # Retrieve adaptive time series
+                lat_ad = np.array(ts_latency[cond_adaptive].get(pair, []))
+                sttc_ad = np.array(ts_sttc[cond_adaptive].get(pair, []))
 
-                # Perform correlation-based analysis
-                result = self.compare_adaptive_to_controls(
-                    pair=pair,
-                    adaptive_ts=adaptive_ts,
-                    control_ts_dict=control_ts_dict,
-                    min_corr_diff=min_corr_diff
-                )
+                if len(lat_ad) < 2 or len(sttc_ad) < 2:
+                    continue
+
+                # Smooth
+                if smooth:
+                    lat_ad = uniform_filter1d(lat_ad, size=smooth_window)
+                    sttc_ad = uniform_filter1d(sttc_ad, size=smooth_window)
+
+                # Check for constant arrays before z-score
+                std_lat = np.std(lat_ad)
+                std_sttc = np.std(sttc_ad)
+                if std_lat == 0 or std_sttc == 0:
+                    continue
+
+                # Z-score
+                z_lat = (lat_ad - np.mean(lat_ad)) / std_lat
+                z_sttc = (sttc_ad - np.mean(sttc_ad)) / std_sttc
+
+                slope_lat = np.polyfit(np.arange(len(lat_ad)), lat_ad, 1)[0]
+                slope_sttc = np.polyfit(np.arange(len(sttc_ad)), sttc_ad, 1)[0]
+
+                # Compare with controls
+                control_corrs = {}
+                p_values = []
+
+                for cond in control_conditions:
+                    lat_ctrl = np.array(ts_latency[cond].get(pair, []))
+                    sttc_ctrl = np.array(ts_sttc[cond].get(pair, []))
+
+                    if len(lat_ctrl) != len(lat_ad) or len(lat_ctrl) < 2:
+                        continue
+
+                    if smooth:
+                        lat_ctrl = uniform_filter1d(lat_ctrl, size=smooth_window)
+                        sttc_ctrl = uniform_filter1d(sttc_ctrl, size=smooth_window)
+
+                    # Correlation safeguards
+                    r_lat = np.nan if np.std(lat_ctrl) == 0 or std_lat == 0 else pearsonr(lat_ad, lat_ctrl)[0]
+                    r_sttc = np.nan if np.std(sttc_ctrl) == 0 or std_sttc == 0 else pearsonr(sttc_ad, sttc_ctrl)[0]
+
+                    control_corrs[cond] = {
+                        "latency_corr": r_lat,
+                        "sttc_corr": r_sttc
+                    }
+
+                    # Wilcoxon test
+                    try:
+                        if (
+                                len(lat_ad) == len(lat_ctrl) and
+                                len(lat_ad) >= 2 and
+                                not np.allclose(lat_ad, lat_ctrl)
+                        ):
+                            result = wilcoxon(lat_ad, lat_ctrl)
+                            # Robust handling: tuple OR WilcoxonResult object
+                            p = result.pvalue if hasattr(result, "pvalue") else result[1]
+                            p_values.append(p)
+                    except Exception as e:
+                        print(f"Wilcoxon failed for pair {pair} in {cond}: {e}")
+                        continue
+
+                # Final aggregation
+                mean_ctrl_corr_latency = np.nanmean([v["latency_corr"] for v in control_corrs.values()])
+                mean_ctrl_corr_sttc = np.nanmean([v["sttc_corr"] for v in control_corrs.values()])
+                corr_delta_latency = 1.0 - mean_ctrl_corr_latency
+                corr_delta_sttc = 1.0 - mean_ctrl_corr_sttc
+                min_p = np.min(p_values)
+
+                # Check STTC baseline
+                if np.mean(sttc_ad[:3]) < baseline_sttc_thresh:
+                    continue
+
+                result = {
+                    "pair": pair,
+                    "slope_latency": slope_lat,
+                    "slope_sttc": slope_sttc,
+                    "zscore_peak_latency": np.max(np.abs(z_lat)),
+                    "zscore_peak_sttc": np.max(np.abs(z_sttc)),
+                    "corr_delta_latency": corr_delta_latency,
+                    "corr_delta_sttc": corr_delta_sttc,
+                    "wilcoxon_min_p": min_p,
+                    "significant_strengthening": (
+                            slope_lat > 0 and
+                            slope_sttc > 0 and
+                            corr_delta_latency > min_corr_diff and
+                            min_p < 0.05 and
+                            np.max(np.abs(z_sttc)) > zscore_thresh
+                    ),
+                    "control_corrs": control_corrs
+                }
                 results.append(result)
 
             except Exception as e:
-                print(f"Skipping pair {pair}: {e}")
+                print(f"Skipping {pair}: {e}")
+                continue
 
+        # Cache the result
+        self.latency_change_cache[cache_key] = results
         return results
+
+    def plot_top_connection_trajectories(self, results, ts_latency, ts_sttc, top_n=5):
+        """
+        Plot latency and STTC trajectories for top N most significant connection changes.
+
+        Parameters:
+            results (list): Output from analyze_all_latency_changes (must be sorted).
+            ts_latency (dict): Time series of latency values per condition.
+            ts_sttc (dict): Time series of STTC values per condition.
+            top_n (int): Number of top connections to plot.
+        """
+        top_results = [res for res in results if res.get("significant_strengthening", False)][:top_n]
+        n_bins = len(next(iter(ts_latency["Adaptive"].values())))
+        time = np.arange(n_bins)
+
+        for res in top_results:
+            pair = res["pair"]
+            fig, axs = plt.subplots(2, 1, figsize=(8, 5), sharex=True)
+            fig.suptitle(f"Connection {pair} | Δr={res['corr_delta_latency']:.2f}, slope={res['slope_latency']:.3f}")
+
+            for cond in ts_latency:
+                lat_series = ts_latency[cond].get(pair)
+                sttc_series = ts_sttc[cond].get(pair)
+
+                if lat_series and sttc_series:
+                    axs[0].plot(time, lat_series, label=cond)
+                    axs[1].plot(time, sttc_series, label=cond)
+
+            axs[0].set_ylabel("Latency (ms)")
+            axs[1].set_ylabel("STTC")
+            axs[1].set_xlabel("Time Bin")
+            axs[0].legend()
+            axs[1].legend()
+            axs[0].grid(True, linestyle="--", alpha=0.3)
+            axs[1].grid(True, linestyle="--", alpha=0.3)
+            plt.tight_layout()
+            plt.show()
+
 
     def compute_firing_orders(self, window_ms=50, top_k=5, unit_ids=None):
         self.firing_orders = {}  # Reset
@@ -1150,6 +1330,226 @@ class OrgLearningEval:
 
         return df
 
+
+    def show_adaptive_spatial_network(self, dt=0.02, min_spikes=5, sttc_threshold=0.05):
+        """
+        Create spatial network visualization for the adaptive dataset, similar to fig5.py output.
+        Shows neurons as nodes positioned spatially with connections based on STTC.
+        Includes ALL neurons in the dataset to capture maximum network connectivity.
+        """
+        # Set to adaptive dataset
+        self.set_dataset("Adaptive")
+
+        # Get spike times and basic info
+        spike_times = self.get_spike_times()
+        n_units = len(spike_times)
+        time_range = [0, self.sd_main.length]
+
+        # Get spatial positions for neurons using spike_locs from metadata
+        spike_locs = np.array(self.metadata["spike_locs"])
+
+        # Create position mapping for ALL neurons using spike_locs indices
+        neuron_positions = {}
+        for unit_id in range(min(n_units, len(spike_locs))):
+            try:
+                x, y = spike_locs[unit_id]
+                neuron_positions[unit_id] = (x, y)
+            except (IndexError, ValueError):
+                continue
+
+        # Include ALL neurons with any spikes and spatial positions (much more inclusive)
+        valid_units = [i for i in range(n_units)
+                       if len(spike_times[i]) >= min_spikes and i in neuron_positions]
+
+        print(f"Total neurons in dataset: {n_units}")
+        print(f"Neurons with spatial positions: {len(neuron_positions)}")
+        print(f"Analyzing {len(valid_units)} neurons with >= {min_spikes} spikes and spatial positions")
+
+        # Compute STTC matrix for valid units
+        sttc_matrix = np.zeros((len(valid_units), len(valid_units)))
+
+        for i, neuron_i in enumerate(valid_units):
+            for j, neuron_j in enumerate(valid_units):
+                if i != j:
+                    sttc_coef = self.sttc(
+                        len(spike_times[neuron_i]),
+                        len(spike_times[neuron_j]),
+                        dt, time_range,
+                        spike_times[neuron_i],
+                        spike_times[neuron_j]
+                    )
+                    sttc_matrix[i, j] = sttc_coef if not np.isnan(sttc_coef) else 0
+
+        # Create positions array for active neurons
+        positions = np.array([spike_locs[i] for i in valid_units])
+
+        # Create spatial network plot
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+
+        # Left plot: Spatial network with connections
+        # Plot all electrode positions as background
+        ax1.scatter(spike_locs[:, 0], spike_locs[:, 1], c='lightgray', alpha=0.2, s=5,
+                    label=f'All Electrodes ({len(spike_locs)})')
+
+        # Color neurons by their role and activity level
+        colors = []
+        sizes = []
+        alphas = []
+
+        for i, neuron_id in enumerate(valid_units):
+            spike_count = len(self.sd_main.train[neuron_id])
+
+            # Size based on activity level
+            base_size = 30
+            activity_size = min(80, base_size + spike_count / 50)
+
+            # Color and alpha based on role
+            if neuron_id in self.metadata["training_inds"]:
+                colors.append('red')
+                alphas.append(0.9)
+                sizes.append(activity_size * 1.5)  # Larger for training neurons
+            else:
+                colors.append('blue')
+                alphas.append(0.7)
+                sizes.append(activity_size)
+
+        # Plot active neurons
+        scatter = ax1.scatter(positions[:, 0], positions[:, 1],
+                              c=colors, s=sizes, alpha=0.8,
+                              edgecolors='black', linewidth=0.5, zorder=5)
+
+        # Draw connections above threshold
+        connection_count = 0
+        connection_strengths = []
+
+        for i in range(len(valid_units)):
+            for j in range(len(valid_units)):
+                if i != j and sttc_matrix[i, j] > sttc_threshold:
+                    x1, y1 = positions[i]
+                    x2, y2 = positions[j]
+
+                    strength = sttc_matrix[i, j]
+                    connection_strengths.append(strength)
+
+                    # Line properties based on connection strength
+                    max_sttc = np.max(sttc_matrix) if np.max(sttc_matrix) > 0 else 1.0
+                    linewidth = 0.3 + 2 * (strength / max_sttc)
+                    alpha = 0.2 + 0.6 * (strength / max_sttc)
+
+                    # Different colors for training neuron connections
+                    neuron_i_id = valid_units[i]
+                    neuron_j_id = valid_units[j]
+
+                    if (neuron_i_id in self.metadata["training_inds"] and
+                            neuron_j_id in self.metadata["training_inds"]):
+                        color = 'orange'  # Training-training connections
+                    elif (neuron_i_id in self.metadata["training_inds"] or
+                          neuron_j_id in self.metadata["training_inds"]):
+                        color = 'purple'  # Training-other connections
+                    else:
+                        color = 'gray'    # Other-other connections
+
+                    ax1.plot([x1, x2], [y1, y2], color=color,
+                             linewidth=linewidth, alpha=alpha, zorder=2)
+                    connection_count += 1
+
+        # Network plot styling
+        training_count = sum(1 for nid in valid_units if nid in self.metadata["training_inds"])
+        ax1.set_title(f'Comprehensive Spatial Network - Adaptive Dataset\n'
+                      f'{connection_count} connections (STTC > {sttc_threshold})\n'
+                      f'{len(valid_units)} active neurons ({training_count} training)')
+        ax1.set_xlabel('X position (μm)')
+        ax1.set_ylabel('Y position (μm)')
+        ax1.grid(True, alpha=0.3)
+        ax1.set_aspect('equal')
+
+        # Create legend
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='red',
+                   markersize=10, label='Training Neurons'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='blue',
+                   markersize=8, label='Other Active Neurons'),
+            Line2D([0], [0], color='orange', linewidth=2,
+                   label='Training-Training'),
+            Line2D([0], [0], color='purple', linewidth=2,
+                   label='Training-Other'),
+            Line2D([0], [0], color='gray', linewidth=2,
+                   label='Other-Other')
+        ]
+        ax1.legend(handles=legend_elements, loc='upper right')
+
+        # Right plot: STTC matrix heatmap
+        im = ax2.imshow(sttc_matrix, cmap='viridis', aspect='auto',
+                        vmin=0, vmax=np.percentile(sttc_matrix, 95))
+        ax2.set_title('STTC Matrix (Active Neurons)')
+        ax2.set_xlabel('Neuron Index')
+        ax2.set_ylabel('Neuron Index')
+
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax2, label='STTC')
+
+        plt.tight_layout()
+        plt.show()
+
+        # Print comprehensive statistics
+        mean_sttc = np.mean(sttc_matrix[sttc_matrix > 0]) if np.any(sttc_matrix > 0) else 0
+        max_sttc = np.max(sttc_matrix)
+        total_possible_connections = len(valid_units) * (len(valid_units) - 1)
+        connectivity_density = connection_count / total_possible_connections if total_possible_connections > 0 else 0
+
+        # Connection type statistics
+        training_indices = [i for i, nid in enumerate(valid_units) if nid in self.metadata["training_inds"]]
+
+        training_training_conns = 0
+        training_other_conns = 0
+        other_other_conns = 0
+
+        for i in range(len(valid_units)):
+            for j in range(len(valid_units)):
+                if i != j and sttc_matrix[i, j] > sttc_threshold:
+                    if i in training_indices and j in training_indices:
+                        training_training_conns += 1
+                    elif i in training_indices or j in training_indices:
+                        training_other_conns += 1
+                    else:
+                        other_other_conns += 1
+
+        print(f"\nComprehensive Network Statistics:")
+        print(f"  Active neurons analyzed: {len(valid_units)}")
+        print(f"  Training neurons: {training_count}")
+        print(f"  Mean STTC (non-zero): {mean_sttc:.4f}")
+        print(f"  Max STTC: {max_sttc:.4f}")
+        print(f"  Total connections: {connection_count}")
+        print(f"  Network density: {connectivity_density:.2%}")
+        print(f"  Connection breakdown:")
+        print(f"    Training-Training: {training_training_conns}")
+        print(f"    Training-Other: {training_other_conns}")
+        print(f"    Other-Other: {other_other_conns}")
+
+        if connection_strengths:
+            print(f"  Connection strength stats:")
+            print(f"    Mean: {np.mean(connection_strengths):.4f}")
+            print(f"    Std: {np.std(connection_strengths):.4f}")
+            print(f"    95th percentile: {np.percentile(connection_strengths, 95):.4f}")
+
+        return sttc_matrix, valid_units, positions
+
+
+
+
+    def get_spike_times(self):
+        """
+        Get spike times from the currently active dataset.
+        Returns:
+        --------
+        list of np.ndarray :
+            List of spike time arrays, one for each unit in the dataset.
+            Each array contains spike times in milliseconds.
+        """
+        if not hasattr(self, 'sd_main') or self.sd_main is None:
+            raise ValueError("No dataset currently active. Call set_dataset first.")
+        return self.sd_main.train  # train contains list of spike times for each unit
 
     @staticmethod
     def show_metric_scatter_plots(df):
