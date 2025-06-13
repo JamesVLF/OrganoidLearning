@@ -21,12 +21,20 @@ def add_label(obj, label):
         obj['__label__'] = label
     return obj
 
-def load_datasets(paths):
+def load_datasets_key(paths):
     """Load generic datasets from a dictionary of {label: path}."""
     datasets = {}
     for key, path in paths.items():
         obj = load_pickle(path)
         datasets[key] = add_label(obj, key)
+    return datasets
+
+def load_datasets(paths):
+    """Load datasets from {label: path} and attach label."""
+    datasets = {}
+    for label, path in paths.items():
+        obj = load_pickle(path)
+        datasets[label] = add_label(obj, label)
     return datasets
 
 def load_log_data(log_paths):
@@ -73,6 +81,38 @@ def load_metadata(path="data/metadata.pkl"):
     else:
         print("Missing metadata.pkl")
         return None
+
+def label_task_units(metadata):
+    """
+    Assign roles to each neuron using unit IDs in the 'channel' column of the mapping.
+    Returns:
+        unit_role_map: dict mapping unit ID to role
+        task_unit_ids: set of all task-relevant unit IDs
+    """
+    # Define unit IDs corresponding to each role directly
+    training_unit_ids = {1, 2, 3, 4, 5, 6}
+    encode_unit_ids = {0, 7}
+    decode_unit_ids = {8, 9}
+
+    mapping_df = metadata["mapping"]
+    mapping_df["role"] = None
+
+    mapping_df.loc[mapping_df["channel"].isin(training_unit_ids), "role"] = "training"
+    mapping_df.loc[mapping_df["channel"].isin(encode_unit_ids), "role"] = "encode"
+    mapping_df.loc[mapping_df["channel"].isin(decode_unit_ids), "role"] = "decode"
+    mapping_df["is_task_unit"] = mapping_df["role"].notnull()
+
+    unit_role_map = mapping_df.set_index("channel")["role"].dropna().to_dict()
+    task_unit_ids = set(unit_role_map.keys())
+
+    # Optionally inject role indices into metadata for reuse
+    metadata["task_unit_info"] = mapping_df
+    metadata["training_unit_ids"] = list(training_unit_ids)
+    metadata["encode_unit_ids"] = list(encode_unit_ids)
+    metadata["decode_unit_ids"] = list(decode_unit_ids)
+
+    return unit_role_map, task_unit_ids
+
 
 def load_curation(qm_path):
     """

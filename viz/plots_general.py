@@ -7,22 +7,35 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from typing import Dict
 import networkx as nx
-from spikedata.spikedata import SpikeData
 
 
-def plot_raster(spike_data, title="Spike Raster", start=0, end=None):
-    idces, times = spike_data.idces_times()
+
+def plot_raster(spike_data, title="Spike Raster", start=0, end=None, unit_ids=None):
+    idces, times = spike_data.idces_times()  # Returns arrays of unit indices and spike times (μs)
+
     if end is None:
-        end = spike_data.length / 1000
-    mask = (times >= start * 1000) & (times <= end * 1000)
-    times, idces = times[mask], idces[mask]
+        end = spike_data.length / 1000  # Convert to seconds
 
+    # Time filtering
+    time_mask = (times >= start * 1000) & (times <= end * 1000)
+    times, idces = times[time_mask], idces[time_mask]
+
+    # Unit filtering
+    if unit_ids is not None:
+        unit_idx_map = {uid: i for i, uid in enumerate(spike_data.unit_ids)}
+        selected_indices = {unit_idx_map[uid] for uid in unit_ids if uid in unit_idx_map}
+        unit_mask = [idx in selected_indices for idx in idces]
+        times = times[unit_mask]
+        idces = idces[unit_mask]
+
+    # Plot
     plt.figure(figsize=(15, 6))
     plt.title(title)
     plt.scatter(times / 1000, idces, marker='|', s=1)
     plt.xlabel("Time (s)")
     plt.ylabel("Unit #")
     plt.show()
+
 
 def plot_firing_rates(rates, title="Mean Firing Rates"):
     plt.figure(figsize=(8, 4))
@@ -343,76 +356,93 @@ def plot_time_balanced_with_training(
     plt.tight_layout()
     plt.show()
 
-def plot_raster_pretty(sd, title="Spike Raster", l1=-10, l2=False, xsize=20, ysize=6, analyze=False):
+def plot_raster_pretty(
+        sd,
+        title="Spike Raster",
+        l1=0,
+        l2=None,
+        xsize=20,
+        ysize=6,
+        analyze=False,
+        unit_ids=None
+):
     """
-    Plots a configuable raster plot of the spike data.
-        sd : spike data object from braingeneers
-        title : Title of the plot
-        l1 : start time in seconds
-        l2 : end time in seconds
-        xsize : width of the plot
-        ysize : height of the plot
-        analyze : If True, will plot the population rate as well
+    Plots a configurable raster plot of the spike data.
+
+    Parameters:
+    - sd : SpikeData object
+    - title : Plot title
+    - l1 : start time in seconds
+    - l2 : end time in seconds (defaults to duration)
+    - xsize : figure width
+    - ysize : figure height
+    - analyze : if True, overlays smoothed population rate
+    - unit_ids : optional list of unit IDs to filter
     """
 
-    if l2==False:
-        l2 = sd.length / 1000 + 10
+    if l2 is None:
+        l2 = sd.length / 1000  # in seconds
 
+    # Get spike indices and times
     idces, times = sd.idces_times()
 
-    if analyze == True:
-        # Get population rate for everything
-        pop_rate = sd.binned(bin_size=1)  # in ms
-        # Lets smooth this to make it neater
-        sigma = 5
-        pop_rate_smooth = gaussian_filter1d(pop_rate.astype(float), sigma=sigma)
-        t = np.linspace(0, sd.length, pop_rate.shape[0]) / 1000
+    # Filter by unit_ids if provided
+    if unit_ids is not None:
+        uid_to_idx = {uid: i for i, uid in enumerate(sd.unit_ids)}
+        selected_indices = {uid_to_idx[uid] for uid in unit_ids if uid in uid_to_idx}
+        mask_units = np.isin(idces, list(selected_indices))
+    else:
+        mask_units = np.ones_like(idces, dtype=bool)
 
-        # Determine the stop_time if it's not provided
-        if l2 is None:
-            l2 = t[-1]
+    # Filter by time
+    mask_time = (times >= l1 * 1000) & (times <= l2 * 1000)
 
-        # Filter times and idces within the specified start and stop times
-        mask = (times >= l1 * 1000) & (times <= l2 * 1000)
-        times = times[mask]
-        idces = idces[mask]
+    # Combine masks
+    mask = mask_units & mask_time
+    times = times[mask]
+    idces = idces[mask]
 
+    # Begin plotting
     fig, ax = plt.subplots(figsize=(xsize, ysize))
     fig.suptitle(title)
-    ax.scatter(times/1000,idces,marker='|',s=1)
+    ax.scatter(times / 1000, idces, marker='|', s=1)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Unit #")
+    ax.set_xlim(l1, l2)
 
-    if analyze == True:
+    # Optional: Plot population rate
+    if analyze:
+        pop_rate = sd.binned(bin_size=1).astype(float)
+        pop_rate_smooth = gaussian_filter1d(pop_rate, sigma=5)
+        t = np.linspace(0, sd.length, pop_rate.shape[0]) / 1000
+
         ax2 = ax.twinx()
         ax2.plot(t, pop_rate_smooth, c='r', alpha=0.6)
-        ax2.set_ylabel('Firing Rate')
+        ax2.set_ylabel("Firing Rate")
 
-    ax.set_xlabel("Time(s)")
-    ax.set_ylabel('Unit #')
-    plt.xlim(l1, l2)
     plt.show()
 
-def plot_neuron_raster_comparison_stacked(spike_datasets, neuron_id, start_s=0, end_s=20):
+def plot_neuron_raster_comparison_stacked(spike_datasets, unit_id, start_s=0, end_s=20):
     """
-    Plot spike rasters for a specific neuron across multiple conditions,
-    with stacked rows for clarity (rather than overlaying them).
+    Plot spike rasters for a specific neuron index across multiple conditions.
 
     Parameters:
         spike_datasets: list of (label, SpikeData) tuples
-        neuron_id: int, neuron index
+        unit_id: int, neuron index (0-based)
         start_s: float, start time in seconds
         end_s: float, end time in seconds
     """
-    y_positions = {
-        label: i + 1 for i, (label, _) in enumerate(spike_datasets)
-    }
-
+    y_positions = {label: i + 1 for i, (label, _) in enumerate(spike_datasets)}
     plt.figure(figsize=(10, 5))
 
     for label, sd in spike_datasets:
+        if unit_id < 0 or unit_id >= sd.N:
+            continue  # Skip if unit index is out of range
+
         idces, times = sd.idces_times()
         times = times / 1000  # ms → s
 
-        mask = (idces == neuron_id) & (times >= start_s) & (times <= end_s)
+        mask = (idces == unit_id) & (times >= start_s) & (times <= end_s)
         spike_times = times[mask]
         y_center = y_positions[label]
 
@@ -421,10 +451,11 @@ def plot_neuron_raster_comparison_stacked(spike_datasets, neuron_id, start_s=0, 
     plt.yticks(list(y_positions.values()), list(y_positions.keys()))
     plt.xlabel("Time (s)")
     plt.ylabel("Condition")
-    plt.title(f"Neuron {neuron_id} Raster (Across Conditions)")
+    plt.title(f"Unit {unit_id} Raster (Across Conditions)")
     plt.grid(True, axis='x', linestyle='--', alpha=0.3)
     plt.tight_layout()
     plt.show()
+
 
 def plot_rank_order_matrix(rho_matrix, title="Rank Order Correlation"):
     plt.figure(figsize=(8, 6))
@@ -572,21 +603,21 @@ def plot_top_firing_orders(order_counts):
     plt.tight_layout()
     plt.show()
 
-def causal_plot_from_matrices(first_order, multi_order, title="", training_inds=None):
+def causal_plot_from_matrices(first_order, multi_order, title="", unit_ids=None):
     """
-    Plot causal connectivity heatmaps from precomputed matrices (restricted to training neurons).
+    Plot causal connectivity heatmaps from precomputed matrices.
 
     Parameters:
-        first_order: np.ndarray, shape (N, N)
-        multi_order: np.ndarray, shape (N, N)
+        first_order: np.ndarray
+        multi_order: np.ndarray
         title: str
-        training_inds: list of neuron indices (e.g., ole.metadata["training_inds"])
+        unit_ids: list[int] – optional subset of unit indices to visualize
     """
-    if training_inds is not None:
-        first_order = first_order[np.ix_(training_inds, training_inds)]
-        multi_order = multi_order[np.ix_(training_inds, training_inds)]
+    if unit_ids is not None:
+        unit_ids = np.array(unit_ids)
+        first_order = first_order[np.ix_(unit_ids, unit_ids)]
+        multi_order = multi_order[np.ix_(unit_ids, unit_ids)]
 
-    # Print first-order latency values only (nonzero entries)
     print(f"\nFirst-Order Weighted Latencies (±15 ms) — {title}")
     for i in range(first_order.shape[0]):
         for j in range(first_order.shape[1]):
@@ -597,14 +628,14 @@ def causal_plot_from_matrices(first_order, multi_order, title="", training_inds=
     fig, axs = plt.subplots(1, 2, figsize=(10, 4))
     fig.suptitle(title)
 
-    im1 = axs[0].imshow(first_order, cmap="Greens")
-    axs[0].set_title("First Order (±15 ms)")
+    im1 = axs[0].imshow(first_order, cmap="viridis")
+    axs[0].set_title("First-Order (±15 ms)")
     axs[0].set_xlabel("Target Neuron")
     axs[0].set_ylabel("Source Neuron")
     fig.colorbar(im1, ax=axs[0], shrink=0.8)
 
-    im2 = axs[1].imshow(multi_order, cmap="Greens")
-    axs[1].set_title("Multi-Order (±200 ms)")
+    im2 = axs[1].imshow(multi_order, cmap="plasma")
+    axs[1].set_title("Multi-Order (±window)")
     axs[1].set_xlabel("Target Neuron")
     axs[1].set_ylabel("Source Neuron")
     fig.colorbar(im2, ax=axs[1], shrink=0.8)
@@ -612,38 +643,40 @@ def causal_plot_from_matrices(first_order, multi_order, title="", training_inds=
     plt.tight_layout()
     plt.show()
 
-def causal_plot_from_matrices_counts(first_order, multi_order, title="", training_inds=None, vmin=None, vmax=None):
+def causal_plot_from_matrices_counts(first_order, multi_order, title="", unit_ids=None, vmin=None, vmax=None):
     """
-    Plot causal connectivity heatmaps (Baseline-style).
+    Plot causal connectivity heatmaps based on latency count matrices.
 
     Parameters:
-        first_order: np.ndarray
-        multi_order: np.ndarray
-        title: str
-        training_inds: list of neuron indices (subset)
-        vmin/vmax: for color scaling
+        first_order: np.ndarray – counts within ±15 ms
+        multi_order: np.ndarray – counts within ±200 ms
+        title: str – plot title
+        unit_ids: list[int] or None – unit indices to subset and plot
+        vmin/vmax: float – color scale bounds
     """
-    if training_inds is not None:
-        first_order = first_order[np.ix_(training_inds, training_inds)]
-        multi_order = multi_order[np.ix_(training_inds, training_inds)]
+    if unit_ids is not None:
+        unit_ids = np.array(unit_ids)
+        first_order = first_order[np.ix_(unit_ids, unit_ids)]
+        multi_order = multi_order[np.ix_(unit_ids, unit_ids)]
 
     fig, axs = plt.subplots(1, 2, figsize=(10, 4))
     fig.suptitle(title, fontsize=14)
 
-    im1 = axs[0].imshow(first_order, cmap="Greens", vmin=vmin, vmax=vmax)
+    im1 = axs[0].imshow(first_order, cmap="viridis", vmin=vmin, vmax=vmax)
     axs[0].set_title("First Order (±15 ms)")
-    axs[0].set_xlabel("Reactivity Index")
-    axs[0].set_ylabel("Stimulus Index")
+    axs[0].set_xlabel("Target Unit")
+    axs[0].set_ylabel("Source Unit")
     fig.colorbar(im1, ax=axs[0], shrink=0.8)
 
-    im2 = axs[1].imshow(multi_order, cmap="Greens", vmin=vmin, vmax=vmax)
+    im2 = axs[1].imshow(multi_order, cmap="plasma", vmin=vmin, vmax=vmax)
     axs[1].set_title("Multi-Order (±200 ms)")
-    axs[1].set_xlabel("Reactivity Index")
-    axs[1].set_ylabel("Stimulus Index")
+    axs[1].set_xlabel("Target Unit")
+    axs[1].set_ylabel("Source Unit")
     fig.colorbar(im2, ax=axs[1], shrink=0.8)
 
     plt.tight_layout()
     plt.show()
+
 
 def plot_order_on_array(matrix, coords, title="", top_n=None):
     """Plot inferred firing order overlaid on spatial coordinates."""

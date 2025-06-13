@@ -8,11 +8,30 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from spikedata.spikedata import SpikeData
 
-def calculate_mean_firing_rates(spike_data):
+def calculate_mean_firing_rates(spike_data, unit_ids=None):
+    """
+    Compute mean firing rate (Hz) for specified or all units.
+
+    Parameters:
+        spike_data: SpikeData object
+        unit_ids: list of unit IDs to include (default: all)
+
+    Returns:
+        np.ndarray of firing rates (Hz), in order of unit_ids
+    """
+    if unit_ids is None:
+        selected_units = spike_data.train
+    else:
+        # Map unit IDs to their index in spike_data.unit_ids
+        indices = [spike_data.unit_ids.index(uid) for uid in unit_ids]
+        selected_units = [spike_data.train[i] for i in indices]
+
+    duration_s = spike_data.length / 1000.0  # ms → s
+
     return np.array([
-        len(neuron_spikes) / (spike_data.length / 1000)
-        for neuron_spikes in spike_data.train
+        len(spikes) / duration_s for spikes in selected_units
     ])
+
 
 def compute_instantaneous_firing_rate(spike_data, duration_ms=None, sigma=50):
     """Compute smoothed instantaneous firing rates from SpikeData."""
@@ -304,70 +323,73 @@ def analyze_burst_propagation(spike_data, bursts):
 
     return com_mean
 
-def compute_latency_histograms(spike_data, window_ms=200, bin_size=5, neuron_ids=None):
+def compute_latency_histograms(spike_data, window_ms=200, bin_size=5, unit_ids=None):
     """
-    Compute latency histograms for specified neuron pairs.
+    Compute latency histograms for specified unit (neuron) pairs.
 
     Parameters:
         spike_data: SpikeData object
-        window_ms: latency window in ms
-        bin_size: bin width
-        neuron_ids: optional list of neuron indices to restrict analysis
+        window_ms: int – time window in milliseconds
+        bin_size: int – width of histogram bins in ms
+        unit_ids: list of unit indices to compare (default: all)
 
     Returns:
-        histograms: dict[(i, j)] -> histogram array
+        histograms: dict[(i, j)] → histogram array
         bin_edges: np.ndarray
     """
     N = spike_data.N
-    if neuron_ids is None:
-        neuron_ids = list(range(N))
+    all_units = list(range(N))
+
+    if unit_ids is None:
+        unit_ids = all_units
+    else:
+        unit_ids = sorted(set(unit_ids))  # Remove duplicates, sort
 
     histograms = {}
     bin_edges = np.arange(-window_ms, window_ms + bin_size, bin_size)
 
-    for i in neuron_ids:
+    for i in unit_ids:
         latencies_list = spike_data.latencies_to_index(i, window_ms=window_ms)
 
-        for j_idx, j in enumerate(neuron_ids):
-            if i == j:
-                continue
-
-            # j_idx is used to index into latencies_list (which is ordered by all N)
-            if j >= len(latencies_list):
+        # Only compare i to j if both are in unit_ids
+        for j in unit_ids:
+            if i == j or j >= len(latencies_list):
                 continue
 
             latencies = latencies_list[j]
-            if len(latencies) == 0:
-                hist = np.zeros(len(bin_edges) - 1)
-            else:
-                hist, _ = np.histogram(latencies, bins=bin_edges)
+            hist = (
+                np.histogram(latencies, bins=bin_edges)[0]
+                if len(latencies) > 0
+                else np.zeros(len(bin_edges) - 1)
+            )
 
             histograms[(i, j)] = hist
 
     return histograms, bin_edges
 
-def infer_causal_matrices(spike_data, max_latency_ms=200, bin_size=5, neuron_ids=None):
+def infer_causal_matrices(spike_data, max_latency_ms=200, bin_size=5, unit_ids=None):
     """
     Construct directional connection matrices from pairwise latency histograms.
     Categorized by weighted mean latency.
 
     Parameters:
         spike_data: SpikeData object
-        max_latency_ms: latency window size for causal inference (± max_latency_ms)
-        bin_size: bin size used in latency histograms
-        neuron_ids: optional list of neurons to compute causal relationships between
+        max_latency_ms: int, latency window size (± max_latency_ms)
+        bin_size: int, bin size in ms
+        unit_ids: optional list of unit indices (default: all)
 
     Returns:
-        first_order: NxN matrix (direct causal links within ±15 ms)
-        multi_order: NxN matrix (average latency within ±max_latency_ms)
+        first_order: NxN matrix of direct causal links (within ±15 ms)
+        multi_order: NxN matrix of mean latencies (within ±max_latency_ms)
     """
     latency_histograms, bin_edges = compute_latency_histograms(
-        spike_data, window_ms=max_latency_ms, bin_size=bin_size, neuron_ids=neuron_ids
+        spike_data,
+        window_ms=max_latency_ms,
+        bin_size=bin_size,
+        unit_ids=unit_ids
     )
 
-    # Define bin centers
     lag_ms = (bin_edges[:-1] + bin_edges[1:]) / 2
-
     N = spike_data.N
     first_order = np.zeros((N, N))
     multi_order = np.zeros((N, N))
@@ -380,10 +402,10 @@ def infer_causal_matrices(spike_data, max_latency_ms=200, bin_size=5, neuron_ids
         probs = hist / total
         mean_latency = np.sum(lag_ms * probs)
 
-        # Multi-order matrix: average latency in full range
+        # Multi-order: always record
         multi_order[i, j] = mean_latency
 
-        # First-order matrix: direct causal links within ±15 ms
+        # First-order: only if latency is within tight causal band
         if -15 <= mean_latency <= 15:
             first_order[i, j] = mean_latency
 
@@ -447,20 +469,6 @@ def get_sttc(sd, neuron_ids):
     sttc = subset_sd.spike_time_tilings()
     return np.nan_to_num(sttc)
 
-def compute_sttc_for_condition(self, condition, start_ms=0, end_ms=None):
-    """
-    Compute STTC matrix for task neurons in a given condition and time window.
-    """
-
-    if end_ms is None:
-        end_ms = self.spike_data[condition].length
-
-    sd = self.spike_data[condition].subtime(start_ms, end_ms)
-    neuron_ids = self.metadata["task_neuron_ids"]
-
-    sttc_matrix = get_sttc(sd, neuron_ids)
-    key = (condition, start_ms, end_ms)
-    self.sttc_matrices[key] = sttc_matrix
 
 def plot_sttc_matrix(sd, neuron_ids, title="STTC Matrix"):
     sttc = get_sttc(sd, neuron_ids)
