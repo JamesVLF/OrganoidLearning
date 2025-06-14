@@ -298,24 +298,22 @@ class OrgLearningEval:
         self.causal_latency_matrices[key] = first
         self.multi_order_matrices[key] = multi
 
-    def show_causal_plot_from_matrices(self, first_order, multi_order, title="", unit_ids=None):
+    def show_causal_plot_from_matrices(self, first_order, multi_order, title="", unit_ids=None, max_latency_ms=200):
         """
-        Plot causal matrices using a general-purpose utility.
-
-        Parameters:
-            first_order: np.ndarray – result from compute_causal_matrices
-            multi_order: np.ndarray – result from compute_causal_matrices
-            title: str – title for the plot
-            unit_ids: list[int] or None – subset of unit indices to visualize; defaults to all
+        Plot causal matrices with optional auto-title update based on latency window.
         """
         if unit_ids is None:
             unit_ids = list(range(self.sd_main.N))
+
+        if max_latency_ms is not None and "±" not in title:
+            title += f" (±{max_latency_ms} ms)"
 
         viz.plots_general.causal_plot_from_matrices(
             first_order,
             multi_order,
             title=title,
-            unit_ids=unit_ids
+            unit_ids=unit_ids,
+            max_latency_ms=max_latency_ms
         )
 
 

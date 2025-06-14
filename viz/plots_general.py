@@ -603,7 +603,7 @@ def plot_top_firing_orders(order_counts):
     plt.tight_layout()
     plt.show()
 
-def causal_plot_from_matrices(first_order, multi_order, title="", unit_ids=None):
+def causal_plot_from_matrices(first_order, multi_order, title="", unit_ids=None, max_latency_ms=None):
     """
     Plot causal connectivity heatmaps from precomputed matrices.
 
@@ -628,20 +628,24 @@ def causal_plot_from_matrices(first_order, multi_order, title="", unit_ids=None)
     fig, axs = plt.subplots(1, 2, figsize=(10, 4))
     fig.suptitle(title)
 
+    # First-order matrix plot
     im1 = axs[0].imshow(first_order, cmap="viridis")
     axs[0].set_title("First-Order (±15 ms)")
     axs[0].set_xlabel("Target Neuron")
     axs[0].set_ylabel("Source Neuron")
     fig.colorbar(im1, ax=axs[0], shrink=0.8)
 
+    # Multi-order matrix plot with dynamic title
+    if max_latency_ms is not None:
+        multi_title = f"Multi-Order (±{max_latency_ms} ms)"
+    else:
+        multi_title = "Multi-Order (±window)"
+
     im2 = axs[1].imshow(multi_order, cmap="plasma")
-    axs[1].set_title("Multi-Order (±window)")
+    axs[1].set_title(multi_title)
     axs[1].set_xlabel("Target Neuron")
     axs[1].set_ylabel("Source Neuron")
     fig.colorbar(im2, ax=axs[1], shrink=0.8)
-
-    plt.tight_layout()
-    plt.show()
 
 def causal_plot_from_matrices_counts(first_order, multi_order, title="", unit_ids=None, vmin=None, vmax=None):
     """
