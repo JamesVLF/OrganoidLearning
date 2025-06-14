@@ -15,14 +15,14 @@ def causal_plot(causal_info):
     fig.suptitle("Causal Connectivity Matrices")
 
     # First-order
-    pltA = plot["A"].imshow(causal_info["first_order_connectivity"], cmap='Greens')
+    pltA = plot["A"].imshow(causal_info["first_order_connectivity"], cmap='BrBG')
     plot["A"].set_title("First Order (10–15 ms)")
     plot["A"].set_xlabel("Reactivity Index")
     plot["A"].set_ylabel("Stimulus Index")
     fig.colorbar(pltA, ax=plot["A"], shrink=0.7)
 
     # Multi-order
-    pltB = plot["B"].imshow(causal_info["multi_order_connectivity"], cmap='Greens')
+    pltB = plot["B"].imshow(causal_info["multi_order_connectivity"], cmap='twilight_shifted')
     plot["B"].set_title("Nth Order (200 ms)")
     plot["B"].set_xlabel("Reactivity Index")
     plot["B"].set_ylabel("Stimulus Index")

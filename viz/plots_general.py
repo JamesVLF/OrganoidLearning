@@ -166,7 +166,7 @@ def plot_training_pair_metrics(first_order, multi_order, burst_percent, num_neur
 def plot_connectivity_heatmaps(first_order, multi_order):
     """Plot heatmaps of first-order and multi-order connectivity."""
     plt.figure(figsize=(6, 5))
-    sns.heatmap(first_order, annot=True, fmt=".2f", cmap='viridis')
+    sns.heatmap(first_order, annot=True, fmt=".2f", cmap='BrBG')
     plt.title("First Order Connectivity")
     plt.xlabel("Target Neuron (j)")
     plt.ylabel("Source Neuron (i)")
@@ -174,7 +174,7 @@ def plot_connectivity_heatmaps(first_order, multi_order):
     plt.show()
 
     plt.figure(figsize=(6, 5))
-    sns.heatmap(multi_order, annot=True, fmt=".2f", cmap='plasma')
+    sns.heatmap(multi_order, annot=True, fmt=".2f", cmap='twilight_shifted')
     plt.title("Multi Order Connectivity")
     plt.xlabel("Target Neuron (j)")
     plt.ylabel("Source Neuron (i)")
@@ -629,7 +629,7 @@ def causal_plot_from_matrices(first_order, multi_order, title="", unit_ids=None,
     fig.suptitle(title)
 
     # First-order matrix plot
-    im1 = axs[0].imshow(first_order, cmap="viridis")
+    im1 = axs[0].imshow(first_order, cmap="BrBG")
     axs[0].set_title("First-Order (±15 ms)")
     axs[0].set_xlabel("Target Neuron")
     axs[0].set_ylabel("Source Neuron")
@@ -641,7 +641,7 @@ def causal_plot_from_matrices(first_order, multi_order, title="", unit_ids=None,
     else:
         multi_title = "Multi-Order (±window)"
 
-    im2 = axs[1].imshow(multi_order, cmap="plasma")
+    im2 = axs[1].imshow(multi_order, cmap="twilight_shifted")
     axs[1].set_title(multi_title)
     axs[1].set_xlabel("Target Neuron")
     axs[1].set_ylabel("Source Neuron")
@@ -843,284 +843,6 @@ def plot_spatial_connectivity_map(matrix, positions, title="Spatial Connectivity
     plt.tight_layout()
     plt.show()
 
-def create_directed_graph_from_consensus(consensus_order, consensus_scores,
-                                         causal_matrix, threshold=None,
-                                         influence_metric='net_influence'):
-    """
-    Create directed graph from consensus firing order results
-
-    Parameters:
-    -----------
-    consensus_order : array
-        Firing order from consensus method
-    consensus_scores : array
-        Consensus scores for each neuron
-    causal_matrix : array
-        Original causal connectivity matrix
-    threshold : float
-        Minimum connection strength to show (None = auto-detect)
-    influence_metric : str
-        How to calculate node influence ('net_influence', 'total_output', 'total_input')
-    """
-
-    # Create directed graph
-    G = nx.DiGraph()
-
-    # Add nodes with firing order as attribute
-    n_neurons = len(consensus_order)
-    firing_rank = np.argsort(consensus_order)  # Convert order to ranks
-
-    for i in range(n_neurons):
-        G.add_node(i,
-                   firing_rank=firing_rank[i],
-                   consensus_score=consensus_scores[i])
-
-    # Determine threshold for showing edges
-    if threshold is None:
-        # Show top 30% of connections
-        threshold = np.percentile(np.abs(causal_matrix), 70)
-
-    # Add edges based on causal matrix and firing order
-    for i in range(n_neurons):
-        for j in range(n_neurons):
-            if i != j and abs(causal_matrix[i, j]) > threshold:
-                # Only add edge if it respects temporal order
-                if firing_rank[i] < firing_rank[j]:  # i fires before j
-                    G.add_edge(i, j,
-                               weight=abs(causal_matrix[i, j]),
-                               causal_strength=causal_matrix[i, j])
-
-    # Calculate influence metrics for node sizing/coloring
-    if influence_metric == 'net_influence':
-        influence = np.sum(causal_matrix, axis=1) - np.sum(causal_matrix, axis=0)
-    elif influence_metric == 'total_output':
-        influence = np.sum(np.abs(causal_matrix), axis=1)
-    elif influence_metric == 'total_input':
-        influence = np.sum(np.abs(causal_matrix), axis=0)
-    else:
-        influence = consensus_scores
-
-    # Add influence as node attribute
-    for i in range(n_neurons):
-        G.nodes[i]['influence'] = influence[i]
-
-    return G
-
-def visualize_firing_graph(G, layout='spring', figsize=(12, 8),
-                           node_size_range=(300, 2000),
-                           edge_width_range=(0.5, 5),
-                           show_labels=True, save_path=None):
-    """
-    Visualize the directed firing graph
-
-    Parameters:
-    -----------
-    G : networkx.DiGraph
-        The directed graph from create_directed_graph_from_consensus
-    layout : str
-        Layout algorithm ('spring', 'circular', 'hierarchical')
-    """
-
-    plt.figure(figsize=figsize)
-
-    # Choose layout
-    if layout == 'spring':
-        pos = nx.spring_layout(G, k=3, iterations=50)
-    elif layout == 'circular':
-        pos = nx.circular_layout(G)
-    elif layout == 'hierarchical':
-        # Arrange by firing order
-        firing_ranks = [G.nodes[node]['firing_rank'] for node in G.nodes()]
-        pos = {}
-        for i, node in enumerate(G.nodes()):
-            rank = G.nodes[node]['firing_rank']
-            pos[node] = (rank, np.random.uniform(-0.5, 0.5))  # Add some vertical jitter
-    else:
-        pos = nx.spring_layout(G)
-
-    # Extract node attributes
-    influences = [G.nodes[node]['influence'] for node in G.nodes()]
-    firing_ranks = [G.nodes[node]['firing_rank'] for node in G.nodes()]
-
-    # Normalize influences for sizing/coloring
-    influence_norm = (np.array(influences) - np.min(influences)) / (np.max(influences) - np.min(influences) + 1e-8)
-
-    # Node sizes based on influence
-    node_sizes = node_size_range[0] + influence_norm * (node_size_range[1] - node_size_range[0])
-
-    # Node colors based on firing order (early = cool colors, late = warm colors)
-    rank_norm = np.array(firing_ranks) / (len(firing_ranks) - 1)
-    node_colors = plt.cm.viridis(rank_norm)
-
-    # Edge attributes
-    edge_weights = [G.edges[edge]['weight'] for edge in G.edges()]
-    if edge_weights:
-        edge_weight_norm = (np.array(edge_weights) - np.min(edge_weights)) / (np.max(edge_weights) - np.min(edge_weights) + 1e-8)
-        edge_widths = edge_width_range[0] + edge_weight_norm * (edge_width_range[1] - edge_width_range[0])
-    else:
-        edge_widths = [1.0]
-
-    # Draw the graph
-    nx.draw_networkx_nodes(G, pos,
-                           node_size=node_sizes,
-                           node_color=node_colors,
-                           alpha=0.8,
-                           edgecolors='black',
-                           linewidths=1)
-
-    nx.draw_networkx_edges(G, pos,
-                           width=edge_widths,
-                           alpha=0.6,
-                           edge_color='gray',
-                           arrows=True,
-                           arrowsize=20,
-                           arrowstyle='->')
-
-    if show_labels:
-        # Labels showing neuron ID and firing rank
-        labels = {node: f'{node}\n(#{G.nodes[node]["firing_rank"]+1})' for node in G.nodes()}
-        nx.draw_networkx_labels(G, pos, labels, font_size=10, font_weight='bold')
-
-    plt.title('Neural Firing Order Network\n(Node size = influence, Color = firing order, Edges = causal connections)',
-              fontsize=14, pad=20)
-
-    # Add colorbar for firing order
-    sm = plt.cm.ScalarMappable(cmap=plt.cm.viridis,
-                               norm=plt.Normalize(vmin=1, vmax=len(G.nodes())))
-    sm.set_array([])
-    cbar = plt.colorbar(sm, ax=plt.gca(), shrink=0.8)
-    cbar.set_label('Firing Order (1=earliest)', rotation=270, labelpad=20)
-
-    plt.axis('off')
-    plt.tight_layout()
-
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-
-    plt.show()
-
-    return pos
-
-def create_multiple_graph_views(consensus_order, consensus_scores, causal_matrix,
-                                first_order_matrix=None, multi_order_matrix=None):
-    """
-    Create multiple views of the same network
-    """
-
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-    # View 1: Standard spring layout
-    G1 = create_directed_graph_from_consensus(consensus_order, consensus_scores, causal_matrix)
-    plt.sca(axes[0,0])
-    pos1 = nx.spring_layout(G1, k=2)
-    draw_graph_subplot(G1, pos1, "Spring Layout")
-
-    # View 2: Hierarchical layout (by firing order)
-    plt.sca(axes[0,1])
-    pos2 = create_hierarchical_layout(G1)
-    draw_graph_subplot(G1, pos2, "Hierarchical Layout (by firing order)")
-
-    # View 3: First-order connections only
-    if first_order_matrix is not None:
-        G3 = create_directed_graph_from_consensus(consensus_order, consensus_scores,
-                                                  first_order_matrix, threshold=np.percentile(np.abs(first_order_matrix), 75))
-        plt.sca(axes[1,0])
-        draw_graph_subplot(G3, pos1, "First-Order Connections (±15ms)")
-
-    # View 4: Multi-order connections only
-    if multi_order_matrix is not None:
-        G4 = create_directed_graph_from_consensus(consensus_order, consensus_scores,
-                                                  multi_order_matrix, threshold=np.percentile(np.abs(multi_order_matrix), 75))
-        plt.sca(axes[1,1])
-        draw_graph_subplot(G4, pos1, "Multi-Order Connections (±200ms)")
-
-    plt.tight_layout()
-    plt.show()
-
-def draw_graph_subplot(G, pos, title):
-    """Helper function to draw graph in subplot"""
-
-    # Node attributes
-    influences = [G.nodes[node]['influence'] for node in G.nodes()]
-    firing_ranks = [G.nodes[node]['firing_rank'] for node in G.nodes()]
-
-    # Normalize for visualization
-    influence_norm = (np.array(influences) - np.min(influences)) / (np.max(influences) - np.min(influences) + 1e-8)
-    rank_norm = np.array(firing_ranks) / (len(firing_ranks) - 1)
-
-    node_sizes = 300 + influence_norm * 1000
-    node_colors = plt.cm.viridis(rank_norm)
-
-    # Edge weights
-    edge_weights = [G.edges[edge]['weight'] for edge in G.edges()] if G.edges() else [1]
-    if edge_weights:
-        edge_weight_norm = (np.array(edge_weights) - np.min(edge_weights)) / (np.max(edge_weights) - np.min(edge_weights) + 1e-8)
-        edge_widths = 0.5 + edge_weight_norm * 3
-    else:
-        edge_widths = [1.0]
-
-    # Draw
-    nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color=node_colors,
-                           alpha=0.8, edgecolors='black')
-    nx.draw_networkx_edges(G, pos, width=edge_widths, alpha=0.6,
-                           arrows=True, arrowsize=15, edge_color='gray')
-
-    # Labels
-    labels = {node: f'{node}' for node in G.nodes()}
-    nx.draw_networkx_labels(G, pos, labels, font_size=8, font_weight='bold')
-
-    plt.title(title, fontsize=12)
-    plt.axis('off')
-
-def create_hierarchical_layout(G):
-    """Create layout arranged by firing order"""
-    pos = {}
-    firing_ranks = {node: G.nodes[node]['firing_rank'] for node in G.nodes()}
-
-    # Group nodes by firing rank
-    rank_groups = {}
-    for node, rank in firing_ranks.items():
-        if rank not in rank_groups:
-            rank_groups[rank] = []
-        rank_groups[rank].append(node)
-
-    # Position nodes
-    for rank, nodes in rank_groups.items():
-        for i, node in enumerate(nodes):
-            y_offset = (i - len(nodes)/2) * 0.5 if len(nodes) > 1 else 0
-            pos[node] = (rank * 2, y_offset)
-
-    return pos
-
-def analyze_graph_properties(G):
-    """Analyze properties of the created graph"""
-
-    print("=== Graph Analysis ===")
-    print(f"Nodes: {G.number_of_nodes()}")
-    print(f"Edges: {G.number_of_edges()}")
-    print(f"Density: {nx.density(G):.3f}")
-
-    # Firing order
-    firing_order = sorted(G.nodes(), key=lambda x: G.nodes[x]['firing_rank'])
-    print(f"Firing order: {firing_order}")
-
-    # Most influential nodes
-    influences = [(node, G.nodes[node]['influence']) for node in G.nodes()]
-    influences.sort(key=lambda x: x[1], reverse=True)
-    print(f"Most influential: {influences[:3]}")
-
-    # Network metrics
-    if nx.is_directed_acyclic_graph(G):
-        print("Network is acyclic (no feedback loops)")
-    else:
-        print("Network contains cycles (feedback loops)")
-
-    return {
-        'firing_order': firing_order,
-        'influences': influences,
-        'is_acyclic': nx.is_directed_acyclic_graph(G),
-        'density': nx.density(G)
-    }
 
 
 def plot_firing_sttc_combined(matrix, sttc, coords, title="", top_n=None, sttc_threshold=0.2):
@@ -1191,32 +913,6 @@ def plot_firing_sttc_combined(matrix, sttc, coords, title="", top_n=None, sttc_t
     plt.show()
 
 # Example usage
-def example_usage():
-    """
-    Example of how to use these functions with your consensus results
-    """
-
-    # Assuming you have these from your consensus analysis:
-    # consensus_order, consensus_scores, all_methods = infer_firing_order_consensus(matrix)
-
-    # Example data (replace with your actual results)
-    consensus_order = np.array([0, 1, 2, 3, 4, 5])
-    consensus_scores = np.array([0.8, 0.6, 0.2, -0.1, -0.3, -0.5])
-    causal_matrix = np.random.rand(6, 6) - 0.5  # Replace with your actual matrix
-
-    # Create and visualize the graph
-    G = create_directed_graph_from_consensus(consensus_order, consensus_scores, causal_matrix)
-
-    # Single view
-    visualize_firing_graph(G, layout='hierarchical')
-
-    # Multiple views
-    # create_multiple_graph_views(consensus_order, consensus_scores, causal_matrix)
-
-    # Analyze properties
-    properties = analyze_graph_properties(G)
-
-    return G, properties
 
 def plot_firing_order_overlay(matrix, coords, title="", neuron_labels=None):
     """

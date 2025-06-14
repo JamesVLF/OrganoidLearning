@@ -2,6 +2,8 @@
 OrgLearningEval.py - Central class interface for methods aimed at evaluating the adaptive learning
 capacity of organoids through dynamic control tasks.
 """
+import os
+import pickle
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -415,7 +417,7 @@ class OrgLearningEval:
         sttc = subset.spike_time_tilings()
 
         fig, ax = plt.subplots(figsize=(6, 5))
-        im = ax.imshow(np.nan_to_num(sttc), vmin=0, vmax=1, cmap="viridis")
+        im = ax.imshow(np.nan_to_num(sttc), vmin=0, vmax=1, cmap="seismic")
         ax.set_xlabel("Neuron Index")
         ax.set_ylabel("Neuron Index")
         ax.set_title(title)
@@ -630,31 +632,36 @@ class OrgLearningEval:
             time_b=(0, None),
             order="first",
             show_plot=True,
-            perform_stats=False,
-            alpha=0.05,
-            threshold=5
+            perform_stats=True,
+            threshold=5,
+            colorbar_range=30,
+            overlay_significance=True,
+            export_path=None
     ):
         """
-        Compare causal matrices between two conditions or time windows.
+        Compare causal latency matrices between two conditions or time windows.
 
         Parameters:
-            cond_a (str): First condition label (e.g., "Baseline" or "Adaptive").
-            cond_b (str): Second condition label.
-            time_a (tuple): (start_ms, end_ms) window for cond_a.
-            time_b (tuple): (start_ms, end_ms) window for cond_b.
-            order (str): 'first' or 'multi' – which type of causal matrix to compare.
-            show_plot (bool): Whether to show the difference heatmap.
-            perform_stats (bool): Whether to compute a significance mask.
-            alpha (float): Significance level (not yet used).
-            threshold (float): Latency change threshold (in ms) to flag significant pairs.
+            cond_a, cond_b (str): Condition labels
+            time_a, time_b (tuple): (start_ms, end_ms) time window for each condition
+            order (str): 'first' or 'multi' causal matrix
+            show_plot (bool): Whether to display heatmap
+            perform_stats (bool): Compute significant changes (|Δ| ≥ threshold)
+            threshold (float): Latency difference threshold (ms)
+            colorbar_range (float): Value range (±) for heatmap color scale
+            overlay_significance (bool): Mark significant entries on heatmap
+            return_dataframe (bool): Return stats as DataFrame if True, else as dict
+            export_path (str): Optional path to save stats CSV
 
         Returns:
-            diff (np.ndarray): Difference matrix (cond_b - cond_a).
-            stats (dict): Summary statistics.
-            sig_mask (np.ndarray, optional): Boolean matrix for significance, if perform_stats=True.
+            diff_matrix (np.ndarray)
+            stats_df or stats_dict
+            sig_mask (np.ndarray, optional)
         """
-        key_a = (cond_a, time_a[0], time_a[1] or self.spike_data[cond_a].length)
-        key_b = (cond_b, time_b[0], time_b[1] or self.spike_data[cond_b].length)
+        end_a = time_a[1] or self.spike_data[cond_a].length
+        end_b = time_b[1] or self.spike_data[cond_b].length
+        key_a = (cond_a, time_a[0], end_a)
+        key_b = (cond_b, time_b[0], end_b)
 
         # Select matrices
         if order == "first":
@@ -664,39 +671,77 @@ class OrgLearningEval:
             mat_a = self.multi_order_matrices.get(key_a)
             mat_b = self.multi_order_matrices.get(key_b)
         else:
-            raise ValueError("order must be 'first' or 'multi'")
+            raise ValueError("`order` must be 'first' or 'multi'")
 
         if mat_a is None or mat_b is None:
-            raise ValueError(f"Missing matrices: ensure compute_causal_matrices() was run for both keys.")
+            raise ValueError("Missing matrices. Run compute_causal_matrices() first.")
 
         # Compute difference
-        diff = mat_b - mat_a
+        diff_matrix = mat_b - mat_a
+        sig_mask = np.abs(diff_matrix) >= threshold if perform_stats else None
+
+        # Build stats
         stats = {
-            "mean_diff": np.mean(diff),
-            "sum_abs_diff": np.sum(np.abs(diff)),
-            "max_change": np.max(np.abs(diff)),
+            "condition_A": cond_a,
+            "condition_B": cond_b,
+            "start_A": time_a[0],
+            "end_A": end_a,
+            "start_B": time_b[0],
+            "end_B": end_b,
+            "order": order,
+            "threshold": threshold,
+            "mean_diff": float(np.mean(diff_matrix)),
+            "sum_abs_diff": float(np.sum(np.abs(diff_matrix))),
+            "max_change": float(np.max(np.abs(diff_matrix))),
         }
 
-        sig_mask = None
         if perform_stats:
-            sig_mask = np.abs(diff) >= threshold
             stats["num_significant_pairs"] = int(np.sum(sig_mask))
+
+        stats_df = pd.DataFrame([stats])
+
+        # Export if needed
+        if export_path:
+            stats_df.to_csv(export_path, index=False)
+            print(f"Summary stats saved to {export_path}")
+
+        # Save stats DataFrame
+        cache_dir = os.path.expanduser("~/latency_analysis_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        stats_pkl_path = os.path.join(cache_dir, f"{cond_a}_vs_{cond_b}_{order}_diff_stats.pkl")
+        stats_df.to_pickle(stats_pkl_path)
+        print(f"Summary stats saved to: {stats_pkl_path}")
+
+        # Save diff_matrix as pickle
+        diff_pkl_path = os.path.join(cache_dir, f"{cond_a}_vs_{cond_b}_{order}_diff_matrix.pkl")
+        with open(diff_pkl_path, 'wb') as f:
+            pickle.dump(diff_matrix, f)
+        print(f"Diff matrix saved to: {diff_pkl_path}")
 
         # Plotting
         if show_plot:
-            vmax = np.max(np.abs(diff))
-            plt.imshow(diff, cmap="bwr", vmin=-vmax, vmax=vmax, alpha=alpha)
-            plt.colorbar(label="Δ Causal Value")
-            plt.title(f"Δ Causal Matrix ({cond_b} – {cond_a}) [{order.title()}]")
+            plt.figure(figsize=(8, 6))
+            im = plt.imshow(diff_matrix, cmap="seismic", vmin=-colorbar_range, vmax=colorbar_range)
+            plt.colorbar(im, label="Δ Causal Value (ms)")
+
+            if perform_stats and overlay_significance:
+                y, x = np.where(sig_mask)
+                plt.scatter(x, y, s=4, color='black', alpha=0.7, label="Significant Δ")
+
+            plt.title(f"Δ Causal Matrix: {cond_b} – {cond_a} ({order.title()})")
             plt.xlabel("Source Neuron")
             plt.ylabel("Target Neuron")
+            if perform_stats and overlay_significance:
+                plt.legend(loc="upper right")
             plt.tight_layout()
             plt.show()
 
-            if perform_stats:
-                print(f"Significant changes (|Δ| ≥ {threshold} ms): {stats['num_significant_pairs']} pairs")
+            print("\nSummary Statistics:")
+            print(stats_df.to_string(index=False))
 
-        return (diff, stats, sig_mask) if perform_stats else (diff, stats)
+        return (diff_matrix, stats_df, sig_mask) if perform_stats else (diff_matrix, stats_df)
+
 
     def segment_and_compute_causal(
             self,

@@ -184,7 +184,8 @@ def extract_aligned_spikes(spike_data, burst_windows, window_ms=1000):
     """
     aligned = [[] for _ in range(spike_data.N)]
 
-    for start, _ in burst_windows:
+    for b in burst_windows:
+        start = b["start"] if isinstance(b, dict) else b[0]
         t0 = start  # burst onset in ms
         win_start, win_end = t0 - window_ms // 2, t0 + window_ms // 2
         sd_slice = spike_data.subtime(win_start, win_end)
@@ -241,7 +242,7 @@ def plot_backbone_aligned_heatmaps(aligned_spikes, fr_matrix, window_ms=1000, bi
 
 def analyze_burst_distributions(spike_data, condition_label, burst_func, **kwargs):
     bursts = burst_func(spike_data, **kwargs)  # use extract_population_bursts or burst_detection
-    durations = [end - start for start, end in bursts]
+    durations = [b["end"] - b["start"] for b in bursts]
     freq = len(bursts) / (spike_data.length / 1000)  # bursts per second
 
     plt.figure(figsize=(10, 4))
@@ -266,7 +267,8 @@ def analyze_burst_distributions(spike_data, condition_label, burst_func, **kwarg
 
 def analyze_within_burst_firing(spike_data, bursts, bin_size=20):
     rates = []
-    for start, end in bursts:
+    for b in bursts:
+        start, end = b["start"], b["end"]
         sub_sd = spike_data.subtime(start, end)
         raster = sub_sd.raster(bin_size)
         rates.append(raster.sum(axis=0))  # total population rate
@@ -286,8 +288,12 @@ def analyze_within_burst_firing(spike_data, bursts, bin_size=20):
 
 def analyze_latency_consistency(spike_data, bursts):
     all_latencies = []
-    for start, _ in bursts:
-        latencies = [np.min(train[train >= start] - start) if np.any(train >= start) else np.nan for train in spike_data.train]
+    for b in bursts:
+        start = b["start"]
+        latencies = [
+            np.min(train[train >= start] - start) if np.any(train >= start) else np.nan
+            for train in spike_data.train
+        ]
         all_latencies.append(latencies)
 
     latencies = np.array(all_latencies)
@@ -305,7 +311,8 @@ def analyze_latency_consistency(spike_data, bursts):
 
 def analyze_burst_propagation(spike_data, bursts):
     coms = []
-    for start, end in bursts:
+    for b in bursts:
+        start, end = b["start"], b["end"]
         window = spike_data.subtime(start, end)
         latencies = [np.min(t[t >= 0]) if len(t) > 0 else np.nan for t in window.train]
         coms.append(latencies)
