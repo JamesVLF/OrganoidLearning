@@ -4,11 +4,10 @@ capacity of organoids through dynamic control tasks.
 """
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Optional, Dict, List, Tuple, Any
 import matplotlib.pyplot as plt
-from matplotlib.cm import get_cmap
 from matplotlib.colors import Normalize
+from matplotlib.cm import ScalarMappable, get_cmap
+from matplotlib.lines import Line2D
 from IPython.display import display
 from scipy.stats import spearmanr, pearsonr, wilcoxon
 from core.data_loader import load_spike_data, load_log_data, load_causal_info, load_metadata, label_task_units
@@ -425,8 +424,7 @@ class OrgLearningEval:
         plt.show()
 
     def plot_firing_order_spatial_with_sttc(self, firing_order, sttc_matrix,
-                                            title="Firing Order with STTC",
-                                            arrow_width=0.004):
+                                            title="Firing Order with STTC"):
         """
         Plot neuron firing order using spatial coordinates and STTC-colored arrows.
 
@@ -454,19 +452,24 @@ class OrgLearningEval:
                 missing_units.append(unit_id)
 
         if missing_units:
-            print(f"  {len(missing_units)} unit(s) missing from mapping: {missing_units}")
+            print(f"{len(missing_units)} unit(s) missing from mapping: {missing_units}")
 
         coords = np.array(coords)
-        cmap = get_cmap("plasma")
+        cmap = get_cmap("BuGn")
         norm = Normalize(vmin=0, vmax=1)
 
         summary_rows = []
-        fig, ax = plt.subplots(figsize=(8, 6))
-        sc = ax.scatter(coords[:, 0], coords[:, 1], c=np.arange(len(coords)), cmap="viridis", s=40)
 
-        ax.set_title(title)
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
+        fig, ax = plt.subplots(figsize=(8, 6))
+
+        # Scatter nodes: color = firing order
+        norm_firing = Normalize(vmin=0, vmax=len(coords) - 1)
+        cmap_firing = get_cmap("BuGn")
+        sc = ax.scatter(coords[:, 0], coords[:, 1], c=np.arange(len(coords)), cmap=cmap_firing, s=40, alpha=0.7)
+
+        # Plot arrows: color = STTC
+        cmap_sttc = get_cmap("plasma")
+        norm_sttc = Normalize(vmin=0, vmax=1)
 
         for i in range(len(coords) - 1):
             source_id = used_unit_ids[i]
@@ -483,18 +486,15 @@ class OrgLearningEval:
             except ValueError:
                 continue
 
-            scaled_width = arrow_width * (0.6 + sttc_val)
 
-            # Use annotate for proper arrows
             ax.annotate("",
                         xy=(x1, y1), xytext=(x0, y0),
                         arrowprops=dict(
                             arrowstyle="->",
-                            color=cmap(norm(sttc_val)),
-                            lw=2,
-                            alpha=0.9
-                        )
-                        )
+                            color=cmap_sttc(norm_sttc(sttc_val)),
+                            lw=1,
+                            alpha=.5
+                        ))
 
             summary_rows.append({
                 "source_unit": source_id,
@@ -507,13 +507,22 @@ class OrgLearningEval:
             })
 
         # Annotate start and end
-        ax.text(float(coords[0, 0]), float(coords[0, 1]), "Start", fontsize=8, color="green")
-        ax.text(float(coords[-1, 0]), float(coords[-1, 1]), "End", fontsize=8, color="red")
+        ax.text(float(coords[0, 0]), float(coords[0, 1]), "Start", fontsize=8, color="black", fontweight="bold")
+        ax.text(float(coords[-1, 0]), float(coords[-1, 1]), "End", fontsize=8, color="red", fontweight="bold")
 
-        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-        sm.set_array([])
-        plt.colorbar(sm, ax=ax, label="STTC Score")
+        # Colorbar for firing order (nodes)
+        sm_firing = ScalarMappable(norm=norm_firing, cmap=cmap_firing)
+        sm_firing.set_array([])
+        fig.colorbar(sm_firing, ax=ax, location='right', pad=0.02, label="Firing Order (Early → Late)")
 
+        # Colorbar for STTC (arrows)
+        sm_sttc = ScalarMappable(norm=norm_sttc, cmap=cmap_sttc)
+        sm_sttc.set_array([])
+        fig.colorbar(sm_sttc, ax=ax, location='right', pad=0.10, label="STTC Score")
+
+        ax.set_title(title)
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
         ax.grid(True, linestyle="--", alpha=0.3)
         plt.tight_layout()
         plt.show()
@@ -521,6 +530,96 @@ class OrgLearningEval:
         summary_df = pd.DataFrame(summary_rows)
         display(summary_df)
         return summary_df
+
+
+    def plot_firing_order_spatial_by_rank(self, firing_order, sttc_matrix,
+                                              title="Firing Order (Rank-Colored)",
+                                              arrow_color="gray", arrow_width=0.004):
+
+            if isinstance(firing_order, np.ndarray):
+                firing_order = firing_order.tolist()
+
+            mapping_df = self.metadata["mapping"].set_index("channel")
+            coords = []
+            used_unit_ids = []
+            missing_units = []
+
+            for unit_id in firing_order:
+                if unit_id in mapping_df.index:
+                    x, y = mapping_df.loc[unit_id, ["x", "y"]]
+                    coords.append((x, y))
+                    used_unit_ids.append(unit_id)
+                else:
+                    missing_units.append(unit_id)
+
+            if missing_units:
+                print(f"{len(missing_units)} unit(s) missing from mapping: {missing_units}")
+
+            coords = np.array(coords)
+            fig, ax = plt.subplots(figsize=(8, 6))
+
+            # Color nodes by firing rank (early = red, late = blue)
+            norm = Normalize(vmin=0, vmax=len(coords)-1)
+            cmap = get_cmap("RdBu")
+            node_colors = np.arange(len(coords))
+            sc = ax.scatter(coords[:, 0], coords[:, 1], c=node_colors, cmap=cmap, s=40)
+
+            # Colorbar for firing order
+            sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+            sm.set_array([])
+            plt.colorbar(sm, ax=ax, label="Firing Order (Early → Late)")
+
+            summary_rows = []
+
+            ax.set_title(title)
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+
+            for i in range(len(coords) - 1):
+                source_id = used_unit_ids[i]
+                target_id = used_unit_ids[i + 1]
+                x0, y0 = coords[i]
+                x1, y1 = coords[i + 1]
+
+                try:
+                    idx_source = firing_order.index(source_id)
+                    idx_target = firing_order.index(target_id)
+                    sttc_val = sttc_matrix[idx_source, idx_target]
+                    if np.isnan(sttc_val):
+                        continue
+                except ValueError:
+                    continue
+
+
+
+                # Use annotate for proper arrows
+                ax.annotate("",
+                            xy=(x1, y1), xytext=(x0, y0),
+                            arrowprops=dict(
+                                arrowstyle="->",
+                                color="gray",
+                                lw=0.004,
+                                alpha=0.8
+                            )
+                            )
+
+                summary_rows.append({
+                    "source_unit": source_id,
+                    "target_unit": target_id,
+                    "source_x": x0,
+                    "source_y": y0,
+                    "target_x": x1,
+                    "target_y": y1,
+                    "sttc_score": round(sttc_val, 4)
+                })
+
+            ax.text(float(coords[0, 0]), float(coords[0, 1]), "Start", fontsize=8, color="black")
+            ax.text(float(coords[-1, 0]), float(coords[-1, 1]), "End", fontsize=8, color="black")
+
+            ax.grid(True, linestyle="--", alpha=0.3)
+            plt.tight_layout()
+            plt.show()
+
 
 
     def compare_causal_matrices(
